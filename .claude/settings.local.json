@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "Bash(wc:*)",
+      "Bash(ls:*)",
+      "Bash(rokit:*)",
+      "Bash(wally install:*)",
+      "WebSearch",
+      "WebFetch(domain:wally.run)",
+      "Bash(wally search:*)",
+      "Bash(rojo build:*)"
+    ]
+  }
+}

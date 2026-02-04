@@ -1,0 +1,10 @@
+{
+	"name": "DataScope",
+	"tree": {
+		"$className": "Folder",
+		"$path": "src",
+		"Packages": {
+			"$path": "ServerPackages"
+		}
+	}
+}

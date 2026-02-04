@@ -1,0 +1,15 @@
+{
+	"name": "DataScope",
+	"tree": {
+		"$className": "DataModel",
+		"ServerStorage": {
+			"$className": "ServerStorage",
+			"DataScope": {
+				"$path": "src",
+				"Packages": {
+					"$path": "ServerPackages"
+				}
+			}
+		}
+	}
+}
