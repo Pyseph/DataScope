@@ -134,7 +134,7 @@ The search bar supports multiple modes for finding data:
 
 ## Credits
 
-- Original DataScope concept by [pinehappi](https://github.com/pinehappi/DataScope)
+- Original DataScope concept by [pinehappi](https://github.com/pinehappi/DataDelve)
 - Rewritten using [Vide](https://github.com/centau/vide) by centau
 
 ## License
