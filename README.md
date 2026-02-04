@@ -1,6 +1,6 @@
 # DataScope
 
-A clean rewrite of the DataScope DataStore editor plugin for Roblox Studio.
+Originally a rewrite of the DataDelve plugin, now a separate & powerful DataStore editor plugin for Roblox Studio.
 
 ## Features
 
