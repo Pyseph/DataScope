@@ -40,6 +40,9 @@ Originally a rewrite of the DataDelve plugin, now a separate & powerful DataStor
 
 ## Installation
 
+### From Asset Store
+https://create.roblox.com/store/asset/87717019449403/DataScope
+
 ### Using Wally
 ```toml
 [dependencies]
