@@ -6,9 +6,11 @@
 
 local Vide = require(script.Parent.Parent.Parent.Packages.Vide)
 local Theme = require(script.Parent.Parent.Theme)
+local Tooltip = require(script.Parent.Tooltip)
 
 local create = Vide.create
 local derive = Vide.derive
+local action = Vide.action
 
 export type DataStatsProps = {
 	data: () -> any,
@@ -272,6 +274,20 @@ local function DataStats(props: DataStatsProps): Frame
 		create "Frame" {
 			AutomaticSize = Enum.AutomaticSize.XY,
 			BackgroundTransparency = 1,
+			
+			action(function(f)
+				Tooltip.addTooltip(f, function()
+					local size = 0
+					if props.rawSize then
+						local raw = props.rawSize()
+						if raw then size = raw end
+					else
+						local s = stats()
+						if s then size = s.size end
+					end
+					return `Data Size: {formatSize(size)} / 4.00 MB`
+				end, "top")
+			end),
 			
 			create "UIListLayout" {
 				FillDirection = Enum.FillDirection.Horizontal,

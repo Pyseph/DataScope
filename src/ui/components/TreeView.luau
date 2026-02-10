@@ -37,6 +37,7 @@ export type TreeViewProps = {
 	onToggleExpand: ((path: { string | number }) -> ())?,
 	onExpandPaths: ((paths: { { string | number } }) -> ())?,
 	useAlternatingColors: (() -> boolean)?,
+	onScrollPathChange: ((path: { string | number }) -> ())?,
 }
 
 -- Helper to get value type for display
@@ -139,8 +140,34 @@ local function _isAncestorOf(ancestor: { string | number }, descendant: { string
 	return true
 end
 
-local function TreeView(props: TreeViewProps): ScrollingFrame
+-- Helper to highlight matching text
+local function highlightText(text: string, query: string, color: Color3): string
+	if query == "" then return text end
+	local lowerText = string.lower(text)
+	local lowerQuery = string.lower(query)
+	local start, finish = string.find(lowerText, lowerQuery, 1, true)
+	if not start then return text end
+	
+	local before = string.sub(text, 1, start - 1)
+	local match = string.sub(text, start, finish)
+	local after = string.sub(text, finish + 1)
+	
+	local colorHex = string.format("#%02x%02x%02x", color.R * 255, color.G * 255, color.B * 255)
+	return `{before}<font color="{colorHex}"><b>{match}</b></font>{after}`
+end
+
+local function TreeView(props: TreeViewProps): Frame
 	local theme = Theme.get()
+
+	-- Context Menu State (position stored as local X,Y relative to TreeView root)
+	local contextMenu = source({ visible = false, x = 0, y = 0, node = nil } :: { visible: boolean, x: number, y: number, node: TreeNode? })
+	
+	local closeContextMenu = function()
+		contextMenu({ visible = false, x = 0, y = 0, node = nil })
+	end
+	
+	-- Track TreeView root frame position for coordinate conversion
+	local treeViewAbsPos = source(Vector2.zero)
 
 	-- Local state for expanded paths if not provided
 	local localExpandedPaths = source({} :: { [string]: boolean })
@@ -312,12 +339,27 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 		return nodes
 	end)
 
-	-- Tree node row component
-	local TreeNodeRow = function(node: () -> TreeNode, index: number): Frame
-		local nodeData = node()
+	-- Tree node row component (accepts reactive index for pool-based recycling)
+	local TreeNodeRow = function(node: () -> TreeNode?, index: () -> number): Frame
 		local isHovered = source(false)
 		local isEditing = source(false)
 		local editValue = source("")
+		local keySectionWidth = source(36) -- tracks key section width for value positioning
+		
+		-- Reset transient UI state when the pool slot is reassigned to a different node.
+		-- This prevents stale hover/editing state from carrying over after recycling.
+		local lastNodePathKey = ""
+		effect(function()
+			local n = node()
+			local newPathKey = if n then pathToKey(n.path) else ""
+			if newPathKey ~= lastNodePathKey then
+				if lastNodePathKey ~= "" then -- Don't reset on initial assignment
+					isEditing(false)
+					isHovered(false)
+				end
+				lastNodePathKey = newPathKey
+			end
+		end)
 
 		-- Track if this node is the current search result (for styling)
 		local isCurrentResult = derive(function()
@@ -341,14 +383,12 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 				return c.backgroundTertiary
 			end
 
-			if useAlternatingColors() and index % 2 == 0 then
+			if useAlternatingColors() and index() % 2 == 0 then
 				return c.backgroundSecondary
 			end
 
 			return c.background
 		end)
-		
-		local animatedBaseColor = spring(baseBackgroundColor, 0.1)
 		
 		-- Final background color: search highlight is instant (no spring), hover uses spring
 		local backgroundColor = derive(function()
@@ -358,7 +398,8 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 				local h, s, v = c.accent:ToHSV()
 				return Color3.fromHSV(h, s * 0.6, v * 0.35)
 			end
-			return animatedBaseColor()
+			-- Removed spring animation to fix vide.timeout error
+			return baseBackgroundColor()
 		end)
 
 		local valueColor = derive(function()
@@ -367,6 +408,12 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 			if n == nil then
 				return c.foregroundMuted
 			end
+			
+			-- Dim empty objects/arrays
+			if (n.isObject or n.isArray) and n.childCount == 0 then
+				return c.foregroundMuted
+			end
+
 			local valueType = getValueType(n.value)
 
 			if valueType == "string" then
@@ -431,6 +478,22 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 			props.onValueChange(n.path, newValue)
 		end
 
+		-- Shared right-click handler (opens context menu from any child element)
+		local function handleRightClick(input: InputObject)
+			if input.UserInputType == Enum.UserInputType.MouseButton2 then
+				local n = node()
+				if n then
+					local absPos = treeViewAbsPos()
+					contextMenu({
+						visible = true,
+						x = input.Position.X - absPos.X,
+						y = input.Position.Y - absPos.Y,
+						node = n
+					})
+				end
+			end
+		end
+		
 		-- Track double-click for expand/collapse or editing
 		local lastClickTime = 0
 		local DOUBLE_CLICK_THRESHOLD = 0.3
@@ -460,6 +523,9 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 			Size = UDim2.new(1, 0, 0, 28),
 			BackgroundColor3 = backgroundColor,
 			BorderSizePixel = 0,
+			Visible = function()
+				return node() ~= nil
+			end,
 
 			MouseEnter = function()
 				isHovered(true)
@@ -469,10 +535,12 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 				isHovered(false)
 			end,
 			
-			-- Double-click detection
+			-- Double-click detection and Context Menu
 			InputBegan = function(input: InputObject)
 				if input.UserInputType == Enum.UserInputType.MouseButton1 then
 					handleDoubleClick()
+				else
+					handleRightClick(input)
 				end
 			end,
 			
@@ -514,7 +582,7 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 						BackgroundColor3 = function()
 							return theme.colors().foregroundMuted
 						end,
-						BackgroundTransparency = 0.4,
+						BackgroundTransparency = 0.3, -- Increased contrast (was 0.4)
 						BorderSizePixel = 0,
 					}
 				end),
@@ -532,10 +600,11 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 			Size = UDim2.fromScale(1, 1),
 			BackgroundTransparency = 1,
 
-			-- Left content frame
+			-- Key section (chevron + key + colon) with auto-width
 			create "Frame" {
-				Name = "LeftContent",
-				Size = UDim2.new(1, -60, 1, 0),
+				Name = "KeySection",
+				Size = UDim2.new(0, 0, 1, 0),
+				AutomaticSize = Enum.AutomaticSize.X,
 				BackgroundTransparency = 1,
 
 				create "UIListLayout" {
@@ -571,6 +640,7 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 						if n == nil then return end
 						toggleExpand(n.path)
 					end,
+					InputBegan = handleRightClick,
 				},
 
 				-- Spacer when no expand button
@@ -594,20 +664,22 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 					Text = function()
 						local n = node()
 						if n == nil then return "" end
-						return tostring(n.key)
+						local text = tostring(n.key)
+						if n.matchesSearch then
+							return highlightText(text, searchQuery(), theme.colors().accent)
+						end
+						return text
 					end,
 					TextColor3 = function()
 						local c = theme.colors()
 						local n = node()
 						if n == nil then return c.foreground end
-						-- When it's the current search result, use bright foreground for readability
 						if isCurrentResult() then
 							return c.foreground
 						end
 						if n.matchesSearch then
 							return c.accent
 						end
-						-- Number keys get the number color (orange)
 						if type(n.key) == "number" then
 							return Color3.fromRGB(209, 154, 102)
 						end
@@ -631,77 +703,112 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 					FontFace = theme.font,
 				},
 
-				-- Value display (when not editing)
-				show(function()
-					return not isEditing()
-				end, function()
-					return create "TextButton" {
-						LayoutOrder = 4,
-						Size = UDim2.new(1, -60, 1, 0),
-						BackgroundTransparency = 1,
-						Text = function()
-							local n = node()
-							if n == nil then return "" end
-							return formatValue(n.value)
-						end,
-						TextColor3 = valueColor,
-						TextSize = theme.fontSize.normal,
-						TextXAlignment = Enum.TextXAlignment.Left,
-						FontFace = theme.fontMono,
-						TextTruncate = Enum.TextTruncate.AtEnd,
-						AutoButtonColor = false,
-
-						Activated = function()
-							-- Use the row's double-click handler for consistency
-							handleDoubleClick()
-						end,
-					}
-				end),
-				
-				-- Edit box (when editing)
-				show(isEditing, function()
-					local editBoxRef: TextBox? = nil
-					return create "TextBox" {
-						LayoutOrder = 4,
-						Size = UDim2.new(1, -60, 1, 0),
-						BackgroundColor3 = function()
-							return theme.colors().backgroundTertiary
-						end,
-						BorderSizePixel = 0,
-						Text = editValue,
-						TextColor3 = valueColor,
-						TextSize = theme.fontSize.normal,
-						TextXAlignment = Enum.TextXAlignment.Left,
-						FontFace = theme.fontMono,
-						ClearTextOnFocus = false,
-
-						-- Capture reference and auto-focus when the TextBox is created
-						action(function(textBox: TextBox)
-							editBoxRef = textBox
-							task.defer(function()
-								textBox:CaptureFocus()
-							end)
-						end),
-
-						FocusLost = function(enterPressed: boolean)
-							if enterPressed and editBoxRef then
-								finishEdit(editBoxRef.Text)
-							else
-								isEditing(false)
-							end
-						end,
-
-						create "UICorner" {
-							CornerRadius = UDim.new(0, 4),
-						},
-
-						create "UIPadding" {
-							PaddingLeft = UDim.new(0, 4),
-							PaddingRight = UDim.new(0, 4),
-						},
-					}
+				-- Track key section width for value positioning
+				action(function(keySection: Frame)
+					keySectionWidth(keySection.AbsoluteSize.X)
+					keySection:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+						keySectionWidth(keySection.AbsoluteSize.X)
+					end)
 				end),
 			},
+
+			-- Value display (when not editing) - positioned after key section
+			show(function()
+				return not isEditing()
+			end, function()
+				return create "TextButton" {
+					Position = function()
+						return UDim2.fromOffset(keySectionWidth() + 4, 0)
+					end,
+					Size = function()
+						return UDim2.new(1, -(keySectionWidth() + 4 + 78), 1, 0)
+					end,
+					BackgroundTransparency = 1,
+					Text = function()
+						local n = node()
+						if n == nil then return "" end
+						return formatValue(n.value)
+					end,
+					TextColor3 = valueColor,
+					TextSize = theme.fontSize.normal,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					FontFace = theme.fontMono,
+					TextTruncate = Enum.TextTruncate.AtEnd,
+					AutoButtonColor = false,
+
+					Activated = function()
+						handleDoubleClick()
+					end,
+					InputBegan = handleRightClick,
+				}
+			end),
+
+			-- Edit icon (pencil) - absolutely positioned before badge
+			create "ImageButton" {
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -62, 0.5, 0),
+				Size = UDim2.fromOffset(14, 14),
+				BackgroundTransparency = 1,
+				Image = theme.icons.pencil,
+				ImageColor3 = function()
+					return theme.colors().foregroundMuted
+				end,
+				Visible = function()
+					local n = node()
+					if n == nil then return false end
+					return isHovered() and not isEditing() and type(n.value) ~= "table" and not readOnly()
+				end,
+
+				Activated = startEdit,
+				InputBegan = handleRightClick,
+			},
+
+			-- Edit box (when editing) - positioned after key section
+			show(isEditing, function()
+				local editBoxRef: TextBox? = nil
+				return create "TextBox" {
+					Position = function()
+						return UDim2.fromOffset(keySectionWidth() + 4, 0)
+					end,
+					Size = function()
+						return UDim2.new(1, -(keySectionWidth() + 4 + 64), 1, 0)
+					end,
+					BackgroundColor3 = function()
+						return theme.colors().backgroundTertiary
+					end,
+					BorderSizePixel = 0,
+					Text = editValue,
+					TextColor3 = valueColor,
+					TextSize = theme.fontSize.normal,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					FontFace = theme.fontMono,
+					ClearTextOnFocus = false,
+
+					action(function(textBox: TextBox)
+						editBoxRef = textBox
+						task.defer(function()
+							textBox:CaptureFocus()
+						end)
+					end),
+
+					FocusLost = function(enterPressed: boolean)
+						if enterPressed and editBoxRef then
+							finishEdit(editBoxRef.Text)
+						else
+							isEditing(false)
+						end
+					end,
+
+					create "UICorner" {
+						CornerRadius = UDim.new(0, 4),
+					},
+
+					create "UIPadding" {
+						PaddingLeft = UDim.new(0, 4),
+						PaddingRight = UDim.new(0, 4),
+					},
+				}
+			end),
 
 			-- Child count badge (positioned on the right)
 			create "TextLabel" {
@@ -887,15 +994,219 @@ local function TreeView(props: TreeViewProps): ScrollingFrame
 		end
 	end)
 
-	return VirtualizedList({
+	local list = VirtualizedList({
 		items = flattenedNodes,
 		itemHeight = 28,
 		renderItem = TreeNodeRow,
 		scrollBarThickness = 6,
 		scrollingFrameRef = function(ref)
 			scrollingFrameRef = ref
+			
+			-- Track scroll position for breadcrumbs
+			if ref and props.onScrollPathChange then
+				local lastPathKey = ""
+				ref:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+					local pos = ref.CanvasPosition
+					local topIndex = math.floor(pos.Y / 28) + 1
+					local nodes = flattenedNodes()
+					local topNode = nodes[topIndex]
+					if topNode then
+						local pathKey = table.concat(topNode.path :: any, ".")
+						if pathKey ~= lastPathKey then
+							lastPathKey = pathKey
+							props.onScrollPathChange(topNode.path)
+						end
+					end
+				end)
+			end
 		end,
 	})
+	
+	return create "Frame" {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+		
+		-- Track absolute position for coordinate conversion
+		action(function(frame: Frame)
+			treeViewAbsPos(frame.AbsolutePosition)
+			frame:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
+				treeViewAbsPos(frame.AbsolutePosition)
+			end)
+		end),
+		
+		-- Click anywhere to close context menu (or right-click to re-open on new row)
+		create "TextButton" {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			Text = "",
+			Visible = function() return contextMenu().visible end,
+			ZIndex = 100,
+			
+			-- Use InputBegan to handle both left-click (close) and right-click (re-open)
+			InputBegan = function(input: InputObject)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
+					closeContextMenu()
+				elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+					-- Right-click: find which row is under cursor and re-open menu there
+					local absPos = treeViewAbsPos()
+					local localX = input.Position.X - absPos.X
+					local localY = input.Position.Y - absPos.Y
+					
+					if scrollingFrameRef then
+						local scrollY = scrollingFrameRef.CanvasPosition.Y
+						local rowIndex = math.floor((localY + scrollY) / 28) + 1
+						local nodes = flattenedNodes()
+						local targetNode = nodes[rowIndex]
+						if targetNode then
+							contextMenu({
+								visible = true,
+								x = localX,
+								y = localY,
+								node = targetNode,
+							})
+							return
+						end
+					end
+					closeContextMenu()
+				end
+			end,
+		},
+		
+		list,
+		
+		-- Context Menu
+		show(function() return contextMenu().visible end, function()
+			local state = contextMenu()
+			local n = state.node
+			if not n then return nil end
+			
+			-- Hover sources for menu items (avoids MouseEnter/MouseLeave self param issue)
+			local copyHovered = source(false)
+			local expandHovered = source(false)
+			local deleteHovered = source(false)
+			
+			return create "Frame" {
+				Position = UDim2.fromOffset(state.x, state.y),
+				AutomaticSize = Enum.AutomaticSize.XY,
+				BackgroundColor3 = function() return theme.colors().backgroundSecondary end,
+				BorderSizePixel = 0,
+				ZIndex = 101,
+				
+				create "UICorner" { CornerRadius = UDim.new(0, 6) },
+				create "UIStroke" { 
+					Color = function() return theme.colors().border end,
+					Transparency = 0.5,
+				},
+				create "UIPadding" {
+					PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4),
+					PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 4),
+				},
+				create "UIListLayout" {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					Padding = UDim.new(0, 2),
+				},
+				
+				-- Menu Items
+				create "TextButton" {
+					LayoutOrder = 1,
+					Size = UDim2.new(0, 140, 0, 24),
+					BackgroundColor3 = function() return theme.colors().backgroundTertiary end,
+					BackgroundTransparency = function()
+						return if copyHovered() then 0 else 1
+					end,
+					Text = "  Copy Path",
+					TextColor3 = function() return theme.colors().foreground end,
+					TextSize = theme.fontSize.small,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					FontFace = theme.font,
+					ZIndex = 102,
+					
+					Activated = function()
+						print(table.concat(n.path, "."))
+						closeContextMenu()
+					end,
+					
+					MouseEnter = function()
+						copyHovered(true)
+					end,
+					MouseLeave = function()
+						copyHovered(false)
+					end,
+					
+					create "UICorner" { CornerRadius = UDim.new(0, 4) },
+				},
+				
+				create "TextButton" {
+					LayoutOrder = 2,
+					Size = UDim2.new(0, 140, 0, 24),
+					BackgroundColor3 = function() return theme.colors().backgroundTertiary end,
+					BackgroundTransparency = function()
+						return if expandHovered() then 0 else 1
+					end,
+					Text = "  Expand All",
+					TextColor3 = function() return theme.colors().foreground end,
+					TextSize = theme.fontSize.small,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					FontFace = theme.font,
+					Visible = n.isObject or n.isArray,
+					ZIndex = 102,
+					
+					Activated = function()
+						if props.onToggleExpand then
+							props.onToggleExpand(n.path)
+						end
+						closeContextMenu()
+					end,
+					
+					MouseEnter = function()
+						expandHovered(true)
+					end,
+					MouseLeave = function()
+						expandHovered(false)
+					end,
+					
+					create "UICorner" { CornerRadius = UDim.new(0, 4) },
+				},
+				
+				create "TextButton" {
+					LayoutOrder = 3,
+					Size = UDim2.new(0, 140, 0, 24),
+					BackgroundColor3 = function() return theme.colors().error end,
+					BackgroundTransparency = function()
+						return if deleteHovered() then 0.15 else 1
+					end,
+					Text = "  Delete Key",
+					TextColor3 = function()
+						if deleteHovered() then
+							return Color3.new(1, 1, 1)
+						end
+						return theme.colors().error
+					end,
+					TextSize = theme.fontSize.small,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					FontFace = theme.font,
+					ZIndex = 102,
+					
+					Activated = function()
+						if props.onDelete then
+							props.onDelete(n.path)
+						end
+						closeContextMenu()
+					end,
+					
+					MouseEnter = function()
+						deleteHovered(true)
+					end,
+					MouseLeave = function()
+						deleteHovered(false)
+					end,
+					
+					create "UICorner" { CornerRadius = UDim.new(0, 4) },
+				},
+			}
+		end)
+	}
 end
 
 return TreeView

@@ -50,7 +50,7 @@ local function Breadcrumbs(props: BreadcrumbsProps): Frame
 	local BreadcrumbItem = function(crumb: () -> { label: string, path: { string | number } }, index: number, isLast: () -> boolean): Frame
 		local isHovered = source(false)
 		
-		local textColor = spring(function()
+		local textColor = derive(function()
 			local c = theme.colors()
 			if isLast() then
 				return c.foreground
@@ -59,7 +59,7 @@ local function Breadcrumbs(props: BreadcrumbsProps): Frame
 			else
 				return c.foregroundMuted
 			end
-		end, 0.15)
+		end)
 		
 		return create "Frame" {
 			LayoutOrder = index,
@@ -188,13 +188,14 @@ local function BreadcrumbsCompact(props: BreadcrumbsProps): Frame
 	
 	local displayPath = derive(function(): string
 		local path = props.path()
+		local root = props.rootLabel or "root"
 		if #path == 0 then
-			return props.rootLabel or "root"
+			return root
 		end
 		
-		-- Show last 3 segments with ellipsis if needed
-		local segments: { string } = {}
-		local startIdx = math.max(1, #path - 2)
+		-- Show root + last 2 segments with ellipsis if needed
+		local segments: { string } = { root }
+		local startIdx = math.max(1, #path - 1)
 		
 		if startIdx > 1 then
 			table.insert(segments, "...")

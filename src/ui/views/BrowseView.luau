@@ -256,8 +256,8 @@ local function BrowseView(): Frame
 		)
 	end
 
-	-- Key row component
-	local KeyRow = function(keyInfo: () -> KeyInfo, index: number): Frame
+	-- Key row component (reactive index for pool-based virtualized list)
+	local KeyRow = function(keyInfo: () -> KeyInfo?, index: () -> number): Frame
 		local isHovered = source(false)
 
 		return create "Frame" {
@@ -268,12 +268,15 @@ local function BrowseView(): Frame
 				if isHovered() then
 					return c.backgroundTertiary
 				end
-				if index % 2 == 0 then
+				if index() % 2 == 0 then
 					return c.backgroundSecondary
 				end
 				return c.background
 			end,
 			BorderSizePixel = 0,
+			Visible = function()
+				return keyInfo() ~= nil
+			end,
 
 			MouseEnter = function()
 				isHovered(true)

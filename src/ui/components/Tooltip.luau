@@ -93,13 +93,13 @@ end
 local function TooltipDisplay(): Frame
 	local theme = Theme.get()
 	
-	local opacity = spring(function()
+	local opacity = derive(function()
 		return if tooltipVisible() then 1 else 0
-	end, 0.15)
+	end)
 	
-	local scale = spring(function()
+	local scale = derive(function()
 		return if tooltipVisible() then 1 else 0.9
-	end, 0.15)
+	end)
 	
 	local anchorPoint = derive(function()
 		local anchor = tooltipAnchor()
@@ -250,9 +250,13 @@ local function TooltipDisplay(): Frame
 end
 
 -- Helper to add tooltip behavior to any GuiObject after creation
-local function addTooltip(element: GuiObject, text: string, position: ("top" | "bottom" | "left" | "right")?, delay: number?)
+local function addTooltip(element: GuiObject, text: string | () -> string, position: ("top" | "bottom" | "left" | "right")?, delay: number?)
 	local pos = position or "bottom"
 	local del = delay or 0.4
+	
+	local getText = if type(text) == "function" then text else function()
+		return text :: string
+	end
 	
 	element.MouseEnter:Connect(function()
 		local absolutePos = element.AbsolutePosition
@@ -269,7 +273,7 @@ local function addTooltip(element: GuiObject, text: string, position: ("top" | "
 			tipPos = Vector2.new(absolutePos.X + absoluteSize.X, absolutePos.Y + absoluteSize.Y / 2)
 		end
 		
-		showTooltip(text, tipPos, pos, del)
+		showTooltip(getText(), tipPos, pos, del)
 	end)
 	
 	element.MouseLeave:Connect(function()

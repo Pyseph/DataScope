@@ -1,7 +1,12 @@
 --!strict
 --[[
 	VirtualizedList Component
-	Efficient rendering of large lists using Vide with isolated reactive scope
+	Efficient rendering of large lists using Vide with pool-based recycling.
+	
+	Instead of creating/destroying row components as items scroll in/out of view,
+	maintains a fixed pool of reusable row slots. When the visible range changes,
+	slots are reassigned to new data indices — only property updates occur, no
+	instance creation/destruction. This eliminates lag spikes during fast scrolling.
 ]]
 
 local Vide = require(script.Parent.Parent.Parent.Packages.Vide)
@@ -11,75 +16,197 @@ local create = Vide.create
 local source = Vide.source
 local derive = Vide.derive
 local action = Vide.action
-local root = Vide.root
-local values = Vide.values
+local untrack = Vide.untrack
 
 export type VirtualizedListProps<T> = {
 	items: () -> { T },
 	itemHeight: number,
-	renderItem: (item: () -> T, absoluteIndex: number) -> Frame,
+	renderItem: (item: () -> T?, absoluteIndex: () -> number) -> Frame,
 	overscan: number?,
 	scrollingFrameRef: ((ref: ScrollingFrame) -> ())?,
 	scrollBarThickness: number?,
 }
 
--- Default buffer - renders extra items above/below viewport to handle fast scrolling
-local DEFAULT_OVERSCAN = 8
+-- Larger buffer to prevent blank spaces during fast scrolling
+local DEFAULT_OVERSCAN = 16
+-- Maximum pool slots (covers 4K displays + overscan)
+local MAX_POOL_SIZE = 80
 
 local function VirtualizedList<T>(props: VirtualizedListProps<T>): ScrollingFrame
 	local theme = Theme.get()
 	local overscan = props.overscan or DEFAULT_OVERSCAN
+	local itemHeight = props.itemHeight
 	
-	-- Must use root() to create reactive scope when called from within show/switch
-	local canvasPosition, viewportSize, lastCanvasPosition, visibleRange, visibleItems, canvasSize
+	-- Track slot assignments: dataIndex -> slot
+	type PoolSlot = {
+		assignedIndex: typeof(source(0)),
+	}
 	
-	root(function()
-		canvasPosition = source(Vector2.zero)
-		viewportSize = source(Vector2.zero)
-		lastCanvasPosition = source(Vector2.zero)
+	local poolSlots: { PoolSlot } = {}
+	local poolChildren: { Frame } = {}
+	local indexToSlot: { [number]: PoolSlot } = {}
+	
+	-- Generation counter to cancel stale deferred reassignments
+	local reassignGeneration = 0
+	
+	-- ═══════════════════════════════════════════════════════════════
+	-- Pool slot reassignment (runs OUTSIDE reactive scopes via defer)
+	-- ═══════════════════════════════════════════════════════════════
+	
+	local function reassignSlots()
+		-- Read current state outside of any reactive scope (untracked)
+		local items = untrack(props.items)
+		local scrollFrame: ScrollingFrame? = nil
 		
-		-- Calculate visible range with dynamic overscan based on scroll velocity
-		visibleRange = derive(function()
-			local pos = canvasPosition()
-			local lastPos = lastCanvasPosition()
-			local size = viewportSize()
-			local itemHeight = props.itemHeight
+		-- We'll read viewport info from the ScrollingFrame directly
+		-- to avoid depending on reactive sources during reassignment
+		for _, child in poolChildren do
+			local parent = child.Parent
+			if parent and parent:IsA("ScrollingFrame") then
+				scrollFrame = parent :: ScrollingFrame
+				break
+			end
+		end
+		
+		local posY = 0
+		local viewH = 0
+		if scrollFrame then
+			posY = scrollFrame.CanvasPosition.Y
+			viewH = scrollFrame.AbsoluteWindowSize.Y
+		end
+		
+		if viewH == 0 or itemHeight == 0 or #items == 0 then
+			-- Hide all slots
+			for _, slot in poolSlots do
+				if slot.assignedIndex() ~= 0 then
+					slot.assignedIndex(0)
+				end
+			end
+			indexToSlot = {}
+			return
+		end
+		
+		local startIdx = math.max(1, math.floor(posY / itemHeight) - overscan + 1)
+		local endIdx = math.min(#items, math.ceil((posY + viewH) / itemHeight) + overscan)
+		
+		-- Build set of needed indices
+		local needed: { [number]: boolean } = {}
+		for idx = startIdx, endIdx do
+			needed[idx] = true
+		end
+		
+		-- Separate currently-assigned slots into "keep" vs "free"
+		local newIndexToSlot: { [number]: PoolSlot } = {}
+		local freeSlots: { PoolSlot } = {}
+		
+		for idx, slot in indexToSlot do
+			if needed[idx] then
+				newIndexToSlot[idx] = slot
+			else
+				table.insert(freeSlots, slot)
+			end
+		end
+		
+		-- Also collect unassigned pool slots
+		for _, slot in poolSlots do
+			if slot.assignedIndex() == 0 then
+				table.insert(freeSlots, slot)
+			end
+		end
+		
+		-- Assign free slots to indices that need them
+		local freeIdx = 1
+		for idx = startIdx, endIdx do
+			if not newIndexToSlot[idx] then
+				if freeIdx <= #freeSlots then
+					local slot = freeSlots[freeIdx]
+					slot.assignedIndex(idx)
+					newIndexToSlot[idx] = slot
+					freeIdx += 1
+				end
+			end
+		end
+		
+		-- Hide leftover free slots
+		while freeIdx <= #freeSlots do
+			local slot = freeSlots[freeIdx]
+			if slot.assignedIndex() ~= 0 then
+				slot.assignedIndex(0)
+			end
+			freeIdx += 1
+		end
+		
+		indexToSlot = newIndexToSlot
+	end
+	
+	-- Schedule a deferred reassignment (coalesces multiple calls per frame)
+	local function scheduleReassign()
+		reassignGeneration += 1
+		local gen = reassignGeneration
+		task.defer(function()
+			if gen ~= reassignGeneration then return end -- Stale, skip
+			reassignSlots()
+		end)
+	end
+	
+	-- ═══════════════════════════════════════════════════════════════
+	-- Pool creation (runs once)
+	-- ═══════════════════════════════════════════════════════════════
+	
+	for i = 1, MAX_POOL_SIZE do
+		local assignedIndex = source(0)
+		
+		-- Derive the item data from the assigned index
+		local itemSource = derive(function(): T?
+			local idx = assignedIndex()
+			if idx < 1 then return nil end
 			local items = props.items()
-			
-			if size.Y == 0 or itemHeight == 0 or #items == 0 then
-				return { startIndex = 1, endIndex = 0 }
-			end
-			
-			-- Calculate scroll velocity to add extra buffer when scrolling fast
-			local scrollDelta = math.abs(pos.Y - lastPos.Y)
-			local velocityBuffer = math.floor(scrollDelta / itemHeight)
-			local dynamicOverscan = overscan + math.min(velocityBuffer, 10) -- Cap at 10 extra items
-			
-			local startIndex = math.max(1, math.floor(pos.Y / itemHeight) - dynamicOverscan + 1)
-			local endIndex = math.min(
-				#items,
-				math.ceil((pos.Y + size.Y) / itemHeight) + dynamicOverscan
-			)
-			
-			return { startIndex = startIndex, endIndex = endIndex }
+			if idx > #items then return nil end
+			return items[idx]
 		end)
 		
-		-- Calculate visible items as a simple array of indices
-		visibleItems = derive(function()
-			local range = visibleRange()
-			local visible = {}
-			for i = range.startIndex, range.endIndex do
-				table.insert(visible, i)
-			end
-			return visible
-		end)
+		-- Create the rendered row component (once, reused forever)
+		local renderedItem = props.renderItem(itemSource, assignedIndex)
 		
-		-- Calculate total canvas size
-		canvasSize = derive(function()
-			local totalHeight = #props.items() * props.itemHeight
-			return UDim2.new(1, 0, 0, totalHeight)
-		end)
+		-- Wrapper frame with reactive position and visibility
+		local container = create "Frame" {
+			Name = `PoolSlot_{i}`,
+			Size = UDim2.new(1, 0, 0, itemHeight),
+			Position = function()
+				local idx = assignedIndex()
+				if idx < 1 then return UDim2.new() end
+				return UDim2.fromOffset(0, (idx - 1) * itemHeight)
+			end,
+			Visible = function()
+				return assignedIndex() > 0
+			end,
+			BackgroundTransparency = 1,
+			
+			renderedItem,
+		}
+		
+		local slot: PoolSlot = {
+			assignedIndex = assignedIndex,
+		}
+		
+		poolSlots[i] = slot
+		table.insert(poolChildren, container)
+	end
+	
+	-- ═══════════════════════════════════════════════════════════════
+	-- Total canvas size (reactive, for ScrollingFrame.CanvasSize)
+	-- ═══════════════════════════════════════════════════════════════
+	
+	local canvasSize = derive(function()
+		local totalHeight = #props.items() * itemHeight
+		-- Also trigger reassignment when items change
+		scheduleReassign()
+		return UDim2.new(1, 0, 0, totalHeight)
 	end)
+	
+	-- ═══════════════════════════════════════════════════════════════
+	-- ScrollingFrame
+	-- ═══════════════════════════════════════════════════════════════
 	
 	return create "ScrollingFrame" {
 		Size = UDim2.fromScale(1, 1),
@@ -95,50 +222,27 @@ local function VirtualizedList<T>(props: VirtualizedListProps<T>): ScrollingFram
 		CanvasSize = canvasSize,
 		
 		action(function(instance: ScrollingFrame)
-			-- Call ref callback if provided
+			-- Expose ref if requested
 			if props.scrollingFrameRef then
 				props.scrollingFrameRef(instance)
 			end
 			
-			-- Initialize state with current values
-			canvasPosition(instance.CanvasPosition)
-			viewportSize(instance.AbsoluteWindowSize)
-			
-			-- Set up property listeners
-			local posConnection = instance:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
-				lastCanvasPosition(canvasPosition()) -- Store previous position for velocity calc
-				canvasPosition(instance.CanvasPosition)
+			-- Scroll handler: schedule reassignment on every scroll
+			instance:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+				scheduleReassign()
 			end)
 			
-			local sizeConnection = instance:GetPropertyChangedSignal("AbsoluteWindowSize"):Connect(function()
-				viewportSize(instance.AbsoluteWindowSize)
+			-- Viewport resize: schedule reassignment
+			instance:GetPropertyChangedSignal("AbsoluteWindowSize"):Connect(function()
+				scheduleReassign()
 			end)
 			
-			return function()
-				posConnection:Disconnect()
-				sizeConnection:Disconnect()
-			end
+			-- Initial assignment (deferred to avoid reactive scope conflicts)
+			scheduleReassign()
 		end),
 		
-		-- Render visible items using values (keyed by index) for stable positioning
-		-- Each item gets a stable component that never moves, only created/destroyed
-		values(visibleItems, function(idx)
-			-- Create a stable source for this item's data
-			local itemSource = derive(function()
-				return props.items()[idx]
-			end)
-			
-			local renderedItem = props.renderItem(itemSource, idx)
-			
-			-- Fixed position based on index - never changes for this component
-			return create "Frame" {
-				Size = UDim2.new(1, 0, 0, props.itemHeight),
-				Position = UDim2.new(0, 0, 0, (idx - 1) * props.itemHeight),
-				BackgroundTransparency = 1,
-				
-				renderedItem,
-			}
-		end),
+		-- All pool slot frames (hidden ones have Visible = false)
+		table.unpack(poolChildren),
 	}
 end
 

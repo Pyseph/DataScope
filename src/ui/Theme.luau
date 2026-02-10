@@ -191,6 +191,7 @@ local icons: { [string]: string } = {
 	copy = "rbxassetid://81075541402651",
 	undo = "rbxassetid://113056367955035",
 	redo = "rbxassetid://111087159721510",
+	pencil = "rbxassetid://84652644616748",
 
 	-- Tree view
 	expand = "rbxassetid://137104530823716",

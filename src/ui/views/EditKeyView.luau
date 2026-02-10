@@ -19,6 +19,7 @@ local TreeView = require(script.Parent.Parent.components.TreeView)
 local Tabs = require(script.Parent.Parent.components.Tabs)
 local DataStats = require(script.Parent.Parent.components.DataStats)
 local Tooltip = require(script.Parent.Parent.components.Tooltip)
+local Breadcrumbs = require(script.Parent.Parent.components.Breadcrumbs)
 
 local action = Vide.action
 
@@ -37,6 +38,7 @@ local function EditKeyView(): Frame
 	local expandedPaths = source({} :: { [string]: boolean })
 	local codeEditorText = source("")
 	local showDeleteConfirm = source(false)
+	local scrollPath = source({} :: { string | number })
 
 	-- Sync code editor with data
 	local updateCodeEditor = function()
@@ -352,7 +354,7 @@ local function EditKeyView(): Frame
 						VerticalAlignment = Enum.VerticalAlignment.Center,
 					},
 
-					create "TextLabel" {
+					create "TextBox" {
 						LayoutOrder = 1,
 						Size = UDim2.new(1, 0, 0, 20),
 						BackgroundTransparency = 1,
@@ -365,7 +367,8 @@ local function EditKeyView(): Frame
 						TextSize = theme.fontSize.large,
 						TextXAlignment = Enum.TextXAlignment.Left,
 						FontFace = theme.fontMono,
-						TextTruncate = Enum.TextTruncate.AtEnd,
+						TextEditable = false,
+						ClearTextOnFocus = false,
 					},
 
 					create "TextLabel" {
@@ -374,7 +377,7 @@ local function EditKeyView(): Frame
 						BackgroundTransparency = 1,
 						Text = keyMetadata,
 						TextColor3 = function()
-							return theme.colors().foregroundMuted
+							return theme.colors().foregroundSecondary
 						end,
 						TextSize = theme.fontSize.small,
 						TextXAlignment = Enum.TextXAlignment.Left,
@@ -444,6 +447,15 @@ local function EditKeyView(): Frame
 						tooltip = "Delete this key",
 					}),
 
+					-- Divider
+					create "Frame" {
+						Size = UDim2.new(0, 1, 0, 20),
+						BackgroundColor3 = function()
+							return theme.colors().border
+						end,
+						BorderSizePixel = 0,
+					},
+
 					-- Save button
 					Button({
 						text = function()
@@ -453,7 +465,9 @@ local function EditKeyView(): Frame
 							return "Save"
 						end,
 						onClick = handleSave,
-						variant = "primary",
+						variant = function()
+							return if Store.hasUnsavedChanges() then "primary" else "secondary"
+						end,
 						size = "small",
 						disabled = function()
 							return not Store.hasUnsavedChanges() or Store.isSavingKey()
@@ -733,49 +747,85 @@ local function EditKeyView(): Frame
 					return viewMode() == "tree"
 				end,
 
-				TreeView({
-					data = Store.editedData,
-					onValueChange = Store.updateEditedDataAtPath,
-					onDelete = Store.deleteAtPath,
-					onInsert = Store.insertAtPath,
-					readOnly = Store.isReadOnly,
-					searchQuery = Store.searchQuery,
-					searchResults = Store.searchResults,
-					currentSearchResult = Store.currentSearchResult,
-					expandedPaths = function()
-						return expandedPaths()
-					end,
-					onToggleExpand = function(path)
-						local pathKey = table.concat(
-							Functional.map(path, function(p)
-								return tostring(p)
-							end),
-							"."
-						)
-						local current = expandedPaths()
-						local newPaths = Functional.deepClone(current)
-						newPaths[pathKey] = not newPaths[pathKey]
-						expandedPaths(newPaths)
-					end,
-					onExpandPaths = function(paths: { { string | number } })
-						-- Expand multiple paths at once (doesn't toggle, just ensures expanded)
-						local current = expandedPaths()
-						local newPaths = Functional.deepClone(current)
-						for _, path in paths do
+				create "UIListLayout" {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					Padding = UDim.new(0, 8),
+				},
+
+				-- Breadcrumbs
+				create "Frame" {
+					LayoutOrder = 1,
+					Size = UDim2.new(1, 0, 0, 24),
+					BackgroundTransparency = 1,
+					
+					create "UIPadding" {
+						PaddingLeft = UDim.new(0, 12),
+						PaddingRight = UDim.new(0, 12),
+					},
+					
+					Breadcrumbs.BreadcrumbsCompact({
+						path = function()
+							return scrollPath()
+						end,
+						onNavigate = function(path)
+							-- Navigate to path (could scroll to it in future)
+						end,
+						rootLabel = "Data",
+					}),
+				},
+
+				create "Frame" {
+					LayoutOrder = 2,
+					Size = UDim2.new(1, 0, 1, -32),
+					BackgroundTransparency = 1,
+					
+					TreeView({
+						data = Store.editedData,
+						onValueChange = Store.updateEditedDataAtPath,
+						onDelete = Store.deleteAtPath,
+						onInsert = Store.insertAtPath,
+						readOnly = Store.isReadOnly,
+						searchQuery = Store.searchQuery,
+						searchResults = Store.searchResults,
+						currentSearchResult = Store.currentSearchResult,
+						expandedPaths = function()
+							return expandedPaths()
+						end,
+						onScrollPathChange = function(path)
+							scrollPath(path)
+						end,
+						onToggleExpand = function(path)
 							local pathKey = table.concat(
 								Functional.map(path, function(p)
 									return tostring(p)
 								end),
 								"."
 							)
-							newPaths[pathKey] = true -- Always expand, don't toggle
-						end
-						expandedPaths(newPaths)
-					end,
-					useAlternatingColors = function()
-						return Store.settings().useAlternatingKeyColors
-					end,
-				}),
+							local current = expandedPaths()
+							local newPaths = Functional.deepClone(current)
+							newPaths[pathKey] = not newPaths[pathKey]
+							expandedPaths(newPaths)
+						end,
+						onExpandPaths = function(paths: { { string | number } })
+							-- Expand multiple paths at once (doesn't toggle, just ensures expanded)
+							local current = expandedPaths()
+							local newPaths = Functional.deepClone(current)
+							for _, path in paths do
+								local pathKey = table.concat(
+									Functional.map(path, function(p)
+										return tostring(p)
+									end),
+									"."
+								)
+								newPaths[pathKey] = true -- Always expand, don't toggle
+							end
+							expandedPaths(newPaths)
+						end,
+						useAlternatingColors = function()
+							return Store.settings().useAlternatingKeyColors
+						end,
+					}),
+				},
 			},
 
 			-- Code View
