@@ -31,6 +31,11 @@ local function BrowseView(): Frame
 	-- Local filter state
 	local keyFilter = source("")
 
+	-- Auto-lookup state for keys not in the loaded page
+	local lookupStatus = source("idle" :: "idle" | "loading" | "found" | "not_found" | "error")
+	local lookupKey = source(nil :: KeyInfo?)
+	local lookupDebounce = source(0) -- counter to cancel stale lookups
+
 	-- Filtered keys
 	local filteredKeys = derive(function(): { KeyInfo }
 		local keys = Store.keyList()
@@ -44,6 +49,88 @@ local function BrowseView(): Frame
 			return string.find(string.lower(key.key), filter, 1, true) ~= nil
 		end)
 	end)
+
+	-- Combined keys: filtered loaded keys + auto-looked-up key
+	local displayKeys = derive(function(): { KeyInfo }
+		local filtered = filteredKeys()
+		local looked = lookupKey()
+		local status = lookupStatus()
+
+		-- If we have filtered results from the loaded list, just show those
+		if #filtered > 0 then
+			return filtered
+		end
+
+		-- If auto-lookup found a key, show it
+		if status == "found" and looked then
+			return { looked }
+		end
+
+		return filtered
+	end)
+
+	-- Auto-lookup: when filter has text but no loaded keys match, search the DataStore
+	local function triggerAutoLookup(query: string)
+		local connection = Store.connection()
+		if not connection then
+			return
+		end
+
+		-- Increment debounce counter to cancel any in-flight lookups
+		local currentDebounce = lookupDebounce() + 1
+		lookupDebounce(currentDebounce)
+
+		-- Reset state
+		lookupKey(nil)
+
+		if #query == 0 then
+			lookupStatus("idle")
+			return
+		end
+
+		-- Check if the query already matches loaded keys
+		local keys = Store.keyList()
+		local lowerQuery = string.lower(query)
+		for _, key in keys do
+			if string.find(string.lower(key.key), lowerQuery, 1, true) then
+				lookupStatus("idle")
+				return -- loaded list has matches, no need to look up
+			end
+		end
+
+		-- Debounce: wait before making the API call
+		lookupStatus("loading")
+		task.delay(0.5, function()
+			-- Check if this lookup is still current
+			if lookupDebounce() ~= currentDebounce then
+				return
+			end
+
+			local dsResult = Operations.getDataStore(connection)
+			if not dsResult.success then
+				if lookupDebounce() == currentDebounce then
+					lookupStatus("error")
+				end
+				return
+			end
+
+			local datastore = dsResult.value :: DataStore
+			local keyResult = Operations.getKey(datastore, query)
+
+			-- Check if still current after async call
+			if lookupDebounce() ~= currentDebounce then
+				return
+			end
+
+			if keyResult.success and keyResult.value.value ~= nil then
+				lookupKey({ key = query } :: KeyInfo)
+				lookupStatus("found")
+			else
+				lookupKey(nil)
+				lookupStatus("not_found")
+			end
+		end)
+	end
 
 	-- Load keys from the connected DataStore
 	local loadKeys = function()
@@ -124,22 +211,15 @@ local function BrowseView(): Frame
 			local hook = HookManager.findHookForData(rawValue, context)
 
 			if hook then
-				local success, decompressed = pcall(function()
-					return HookManager.decompress(rawValue, context, hook.name)
-				end)
+				local decompressed = HookManager.decompress(rawValue, context, hook.name)
 
-				if success then
-					-- Update the value with decompressed data
-					local updatedKeyData = Functional.deepClone(keyResult.value)
-					updatedKeyData.value = decompressed
-					Store.setCurrentKey(keyName, updatedKeyData, rawSize)
-					HookManager.setActiveHook(hook.name)
-					Store.showToast("info", `Auto-detected: {hook.name}`)
-				else
-					-- Decompression failed, use raw data
-					Store.setCurrentKey(keyName, keyResult.value, rawSize)
-					warn(`[DataScope] Hook decompression failed: {decompressed}`)
-				end
+				-- Update the value with decompressed data
+				local updatedKeyData = Functional.deepClone(keyResult.value)
+				updatedKeyData.value = decompressed
+
+				Store.setCurrentKey(keyName, updatedKeyData, rawSize)
+				HookManager.setActiveHook(hook.name)
+				Store.showToast("info", `Auto-detected: {hook.name}`)
 			else
 				Store.setCurrentKey(keyName, keyResult.value, rawSize)
 			end
@@ -502,8 +582,9 @@ local function BrowseView(): Frame
 				value = keyFilter,
 				onChange = function(value)
 					keyFilter(value)
+					triggerAutoLookup(value)
 				end,
-				placeholder = "Filter keys...",
+				placeholder = "Search keys...",
 			}),
 		},
 
@@ -556,62 +637,96 @@ local function BrowseView(): Frame
 				}
 			end),
 			
-			-- Empty state
-			show(function()
-				return #filteredKeys() == 0 and not Store.keyListLoading() and Store.keyListError() == nil
-			end, function()
-				return create "Frame" {
+		-- Auto-lookup loading state (shown when searching DataStore)
+		show(function()
+			return lookupStatus() == "loading" and #displayKeys() == 0 and not Store.keyListLoading() and Store.keyListError() == nil
+		end, function()
+			return create "Frame" {
+				Size = UDim2.fromScale(1, 1),
+				BackgroundTransparency = 1,
+
+				create "TextLabel" {
 					Size = UDim2.fromScale(1, 1),
 					BackgroundTransparency = 1,
+					Text = function()
+						return `Looking up "{keyFilter()}"...`
+					end,
+					TextColor3 = function()
+						return theme.colors().foregroundMuted
+					end,
+					TextSize = theme.fontSize.normal,
+					FontFace = theme.font,
+				},
+			}
+		end),
 
-					create "UIListLayout" {
-						SortOrder = Enum.SortOrder.LayoutOrder,
-						HorizontalAlignment = Enum.HorizontalAlignment.Center,
-						VerticalAlignment = Enum.VerticalAlignment.Center,
-						Padding = UDim.new(0, 12),
-					},
+		-- Empty state
+		show(function()
+			return #displayKeys() == 0 and not Store.keyListLoading() and Store.keyListError() == nil and lookupStatus() ~= "loading"
+		end, function()
+			return create "Frame" {
+				Size = UDim2.fromScale(1, 1),
+				BackgroundTransparency = 1,
 
-					create "ImageLabel" {
-						LayoutOrder = 1,
-						Size = UDim2.fromOffset(48, 48),
-						BackgroundTransparency = 1,
-						Image = theme.icons.key,
-						ImageColor3 = function()
-							return theme.colors().foregroundMuted
-						end,
-					},
+				create "UIListLayout" {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					HorizontalAlignment = Enum.HorizontalAlignment.Center,
+					VerticalAlignment = Enum.VerticalAlignment.Center,
+					Padding = UDim.new(0, 12),
+				},
 
-					create "TextLabel" {
-						LayoutOrder = 2,
-						AutomaticSize = Enum.AutomaticSize.XY,
-						BackgroundTransparency = 1,
-						Text = function()
-							if #keyFilter() > 0 then
-								return "No keys match your filter"
+				create "ImageLabel" {
+					LayoutOrder = 1,
+					Size = UDim2.fromOffset(48, 48),
+					BackgroundTransparency = 1,
+					Image = theme.icons.key,
+					ImageColor3 = function()
+						return theme.colors().foregroundMuted
+					end,
+				},
+
+				create "TextLabel" {
+					LayoutOrder = 2,
+					AutomaticSize = Enum.AutomaticSize.XY,
+					BackgroundTransparency = 1,
+					Text = function()
+						if #keyFilter() > 0 then
+							local status = lookupStatus()
+							if status == "not_found" then
+								return `Key "{keyFilter()}" not found`
+							elseif status == "error" then
+								return `Failed to look up "{keyFilter()}"`
 							end
-							return "No keys found in this DataStore"
-						end,
-						TextColor3 = function()
-							return theme.colors().foregroundMuted
-						end,
-						TextSize = theme.fontSize.normal,
-						FontFace = theme.font,
-					},
+							return "No keys match your search"
+						end
+						return "No keys found in this DataStore"
+					end,
+					TextColor3 = function()
+						return theme.colors().foregroundMuted
+					end,
+					TextSize = theme.fontSize.normal,
+					FontFace = theme.font,
+				},
 
-					Button({
+				-- Show Refresh when no filter is active
+				show(function()
+					return #keyFilter() == 0
+				end, function()
+					return Button({
 						text = "Refresh",
 						onClick = loadKeys,
 						variant = "secondary",
-					}),
-				}
-			end),
+					})
+				end),
+			}
+		end),
 			
 			-- Virtualized key list
 			show(function()
-				return #filteredKeys() > 0 and not Store.keyListLoading() and Store.keyListError() == nil
+				return #displayKeys() > 0 and not Store.keyListLoading() and Store.keyListError() == nil
 			end, function()
 				return VirtualizedList({
-					items = filteredKeys,
+					items = displayKeys,
 					itemHeight = 52,
 					renderItem = KeyRow,
 				})

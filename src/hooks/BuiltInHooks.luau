@@ -15,6 +15,45 @@ type JSONValue = Types.JSONValue
 
 local BuiltInHooks = {}
 
+-- Recursive JSON decoder that handles Roblox's buffer serialization
+-- Roblox serializes buffers as {"m":null,"t":"buffer","base64":"..."}
+-- When JSONDecode encounters this, it reconstructs the buffer
+-- This function recursively decodes until we get actual data
+local function recursiveJsonDecode(value: any, maxDepth: number?): any
+	maxDepth = maxDepth or 5
+
+	if maxDepth <= 0 then
+		return value
+	end
+	
+	-- If it's a buffer, try to decode its contents as JSON
+	if typeof(value) == "buffer" then
+		local str = buffer.tostring(value)
+		
+		local success, decoded = pcall(function()
+			return HttpService:JSONDecode(str)
+		end)
+
+		if success then
+			return recursiveJsonDecode(decoded, maxDepth - 1)
+		else
+			return value -- Can't decode, return as-is
+		end
+	end
+	
+	-- If it's a table, recursively process its values
+	if type(value) == "table" then
+		local result = {}
+		for k, v in value do
+			result[k] = recursiveJsonDecode(v, maxDepth)
+		end
+		return result
+	end
+	
+	-- Primitive value, return as-is
+	return value
+end
+
 -- JSON String Hook
 -- Handles data stored as JSON-encoded strings
 BuiltInHooks.JSONString = {
@@ -205,6 +244,7 @@ BuiltInHooks.ZstdDataField = {
 		local b2 = buffer.readu8(buf, 1)
 		local b3 = buffer.readu8(buf, 2)
 		local b4 = buffer.readu8(buf, 3)
+		
 		return b1 == 0x28 and b2 == 0xB5 and b3 == 0x2F and b4 == 0xFD
 	end,
 
@@ -221,9 +261,10 @@ BuiltInHooks.ZstdDataField = {
 			if key == "Data" and typeof(value) == "buffer" then
 				-- Decompress the Data field
 				local decompressed = EncodingService:DecompressBuffer(value, Enum.CompressionAlgorithm.Zstd)
-				local jsonString = buffer.tostring(decompressed)
-				local parsed = HttpService:JSONDecode(jsonString)
-				result[key] = parsed
+				
+				-- Use recursive decoder to handle nested buffer serializations
+				local decoded = recursiveJsonDecode(decompressed)
+				result[key] = decoded
 			else
 				result[key] = value
 			end
@@ -285,8 +326,8 @@ BuiltInHooks.ZstdBuffer = {
 		end
 
 		local decompressed = EncodingService:DecompressBuffer(data, Enum.CompressionAlgorithm.Zstd)
-		local jsonString = buffer.tostring(decompressed)
-		return HttpService:JSONDecode(jsonString)
+		-- Use recursive decoder to handle nested buffer serializations
+		return recursiveJsonDecode(decompressed)
 	end,
 
 	compress = function(data: JSONValue, _context: HookContext): buffer | string

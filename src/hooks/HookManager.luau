@@ -103,7 +103,7 @@ end
 
 -- Find the best hook that can handle the data
 function HookManager.findHookForData(data: any, context: HookContext): HookConfig?
-	for _, hook in registeredHooks do
+	for i, hook in registeredHooks do
 		if hook.canHandle then
 			local success, canHandle = pcall(hook.canHandle, data, context)
 			if success and canHandle then
@@ -127,7 +127,6 @@ function HookManager.decompress(data: any, context: HookContext, hookName: strin
 	end
 
 	if not hook then
-		-- No hook, return data as-is
 		return data, nil
 	end
 
@@ -136,6 +135,7 @@ function HookManager.decompress(data: any, context: HookContext, hookName: strin
 	end
 
 	local success, result = pcall(hook.decompress, data, context)
+	
 	if success then
 		return result, hook.name
 	else

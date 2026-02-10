@@ -26,6 +26,7 @@ type DataStoreType = Types.DataStoreType
 
 local function ConnectView(): Frame
 	local theme = Theme.get()
+	local formRowWidthOffset = 0
 
 	-- Get last used datastore name from history
 	local function getLastDatastoreName(): string
@@ -344,6 +345,11 @@ local function ConnectView(): Frame
 						return Store.currentTab() == "connect"
 					end,
 
+					create "UIPadding" {
+						PaddingLeft = UDim.new(0, 4),
+						PaddingRight = UDim.new(0, 4),
+					},
+
 					create "UIListLayout" {
 						SortOrder = Enum.SortOrder.LayoutOrder,
 						Padding = UDim.new(0, 16),
@@ -352,7 +358,7 @@ local function ConnectView(): Frame
 					-- DataStore Type
 					create "Frame" {
 						LayoutOrder = 1,
-						Size = UDim2.new(1, 0, 0, 0),
+						Size = UDim2.new(1, formRowWidthOffset, 0, 0),
 						AutomaticSize = Enum.AutomaticSize.Y,
 						BackgroundTransparency = 1,
 
@@ -369,7 +375,7 @@ local function ConnectView(): Frame
 					-- DataStore Name
 					create "Frame" {
 						LayoutOrder = 2,
-						Size = UDim2.new(1, 0, 0, 0),
+						Size = UDim2.new(1, formRowWidthOffset, 0, 0),
 						AutomaticSize = Enum.AutomaticSize.Y,
 						BackgroundTransparency = 1,
 
@@ -377,6 +383,10 @@ local function ConnectView(): Frame
 							value = datastoreName,
 							onChange = function(value)
 								datastoreName(value)
+							end,
+							onSubmit = function(value)
+								datastoreName(value)
+								handleConnect()
 							end,
 							placeholder = "Enter DataStore name...",
 							label = "DataStore Name",
@@ -392,7 +402,7 @@ local function ConnectView(): Frame
 					-- Scope (optional for Normal, required for Ordered)
 					create "Frame" {
 						LayoutOrder = 3,
-						Size = UDim2.new(1, 0, 0, 0),
+						Size = UDim2.new(1, formRowWidthOffset, 0, 0),
 						AutomaticSize = Enum.AutomaticSize.Y,
 						BackgroundTransparency = 1,
 
@@ -400,6 +410,10 @@ local function ConnectView(): Frame
 							value = scope,
 							onChange = function(value)
 								scope(value)
+							end,
+							onSubmit = function(value)
+								scope(value)
+								handleConnect()
 							end,
 							placeholder = "Enter scope (optional)...",
 							label = function()
@@ -420,7 +434,7 @@ local function ConnectView(): Frame
 					-- All Scopes toggle (only for Normal DataStore)
 					create "Frame" {
 						LayoutOrder = 4,
-						Size = UDim2.new(1, 0, 0, 32),
+						Size = UDim2.new(1, formRowWidthOffset, 0, 32),
 						BackgroundTransparency = 1,
 						Visible = function()
 							return datastoreType() == "Normal"
@@ -490,7 +504,7 @@ local function ConnectView(): Frame
 					-- Error message
 					create "TextLabel" {
 						LayoutOrder = 5,
-						Size = UDim2.new(1, 0, 0, 0),
+						Size = UDim2.new(1, formRowWidthOffset, 0, 0),
 						AutomaticSize = Enum.AutomaticSize.Y,
 						BackgroundTransparency = 1,
 						Text = function()
@@ -510,7 +524,7 @@ local function ConnectView(): Frame
 					-- Connect button
 					create "Frame" {
 						LayoutOrder = 6,
-						Size = UDim2.new(1, 0, 0, 40),
+						Size = UDim2.new(1, formRowWidthOffset, 0, 40),
 						BackgroundTransparency = 1,
 
 						Button({

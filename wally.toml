@@ -1,6 +1,6 @@
 [package]
 name = "pyseph/datascope"
-version = "1.0.0"
+version = "1.1.0"
 registry = "https://github.com/UpliftGames/wally-index"
 realm = "shared"
 description = "A clean DataStore editor plugin for Roblox Studio using Vide"

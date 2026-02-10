@@ -193,7 +193,10 @@ function Store.setCurrentKey(key: string?, data: KeyData?, rawSize: number?)
 	Store.currentKey(key)
 	Store.currentKeyData(data)
 	Store.currentVersion(nil)
-	Store.editedData(data and Functional.deepClone(data.value) or nil)
+	
+	local clonedValue = data and Functional.deepClone(data.value) or nil
+
+	Store.editedData(clonedValue)
 	Store.hasUnsavedChanges(false)
 	Store.undoStack({})
 	Store.redoStack({})

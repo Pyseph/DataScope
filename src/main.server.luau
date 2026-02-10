@@ -86,7 +86,6 @@ local function initialize()
 		return App({ parent = widget })
 	end)
 
-	print("[DataScope] Initialized")
 end
 
 local function cleanup()

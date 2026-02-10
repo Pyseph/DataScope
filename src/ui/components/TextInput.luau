@@ -15,6 +15,7 @@ local spring = Vide.spring
 export type TextInputProps = {
 	value: () -> string,
 	onChange: (value: string) -> (),
+	onSubmit: ((value: string) -> ())?,
 	placeholder: string?,
 	disabled: (() -> boolean)?,
 	validate: ((value: string) -> (boolean, string?))?,
@@ -242,10 +243,14 @@ local function TextInput(props: TextInputProps): Frame
 							textBoxRef = instance
 						end),
 
-						FocusLost = function()
+						FocusLost = function(enterPressed: boolean)
 							isFocused(false)
 							if textBoxRef then
-								handleChange(textBoxRef.Text)
+								local currentText = textBoxRef.Text
+								handleChange(currentText)
+								if enterPressed and props.onSubmit then
+									props.onSubmit(currentText)
+								end
 							end
 						end,
 
