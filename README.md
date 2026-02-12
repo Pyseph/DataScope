@@ -1,12 +1,12 @@
 <div align="center">
-<img width="500" height="500" alt="image" src="https://github.com/user-attachments/assets/3add7618-1064-4ffb-8197-84813c0dbf31" />
+<img width="300" height="300" alt="image" src="https://github.com/user-attachments/assets/3add7618-1064-4ffb-8197-84813c0dbf31" />
 
 <h1>DataScope</h1>
 
 **[Install from Creator Store](https://create.roblox.com/store/asset/87717019449403/DataScope)**
 
 <h3>A Modern DataStore Editor for Roblox Studio</h3>
-<img width="1200" height="1060" alt="image" src="https://github.com/user-attachments/assets/90ee3656-5dec-43c6-887a-cdbda6c54d9d" />
+<img width="800" height="706.6" alt="image" src="https://github.com/user-attachments/assets/90ee3656-5dec-43c6-887a-cdbda6c54d9d" />
 
 </div>
 
