@@ -147,4 +147,13 @@ export type UndoAction = {
 	newKey: (string | number)?,
 }
 
+export type DiffFieldKind = "added" | "removed"
+
+export type DiffViewState = {
+	versionA: string,
+	versionB: string,
+	pathKinds: { [string]: DiffFieldKind },
+	pathFilter: { [string]: boolean },
+}
+
 return nil

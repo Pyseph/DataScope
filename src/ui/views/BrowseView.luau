@@ -9,8 +9,9 @@ local Theme = require(script.Parent.Parent.Theme)
 local Store = require(script.Parent.Parent.Parent.core.Store)
 local Types = require(script.Parent.Parent.Parent.core.Types)
 local Operations = require(script.Parent.Parent.Parent.datastore.Operations)
+local KeyViewLoader = require(script.Parent.Parent.Parent.datastore.KeyViewLoader)
 local Functional = require(script.Parent.Parent.Parent.utils.Functional)
-local HookManager = require(script.Parent.Parent.Parent.hooks.HookManager)
+local Players = game:GetService("Players")
 
 local Button = require(script.Parent.Parent.components.Button)
 local TextInput = require(script.Parent.Parent.components.TextInput)
@@ -30,6 +31,12 @@ local function BrowseView(): Frame
 
 	-- Local filter state
 	local keyFilter = source("")
+	local quickLoginLoading = source(false)
+
+	local canQuickLogin = derive(function(): boolean
+		local localPlayer = Players.LocalPlayer
+		return localPlayer ~= nil and localPlayer.UserId > 0
+	end)
 
 	-- Auto-lookup state for keys not in the loaded page
 	local lookupStatus = source("idle" :: "idle" | "loading" | "found" | "not_found" | "error")
@@ -163,7 +170,7 @@ local function BrowseView(): Frame
 	end
 
 	-- Load a specific key
-	local loadKey = function(keyName: string)
+	local loadKey = function(keyName: string, requireExisting: boolean?)
 		local connection = Store.connection()
 		if not connection then
 			return
@@ -182,55 +189,45 @@ local function BrowseView(): Frame
 		local datastore = dsResult.value :: DataStore
 		local keyResult = Operations.getKey(datastore, keyName)
 
-		if keyResult.success then
-			-- Try to auto-detect and apply a hook
+		if keyResult.success and (not requireExisting or keyResult.value.value ~= nil) then
 			local context = {
 				datastoreName = connection.name,
 				key = keyName,
 				scope = connection.scope,
 			}
-
-			local rawValue = keyResult.value.value
-			
-			-- Calculate raw data size before any decompression
-			local rawSize: number? = nil
-			if typeof(rawValue) == "buffer" then
-				rawSize = buffer.len(rawValue)
-			elseif type(rawValue) == "string" then
-				rawSize = #rawValue
-			else
-				-- For tables/other types, estimate via JSON encoding
-				local sizeSuccess, jsonStr = pcall(function()
-					return game:GetService("HttpService"):JSONEncode(rawValue)
-				end)
-				if sizeSuccess then
-					rawSize = #jsonStr
-				end
-			end
-			
-			local hook = HookManager.findHookForData(rawValue, context)
-
-			if hook then
-				local decompressed = HookManager.decompress(rawValue, context, hook.name)
-
-				-- Update the value with decompressed data
-				local updatedKeyData = Functional.deepClone(keyResult.value)
-				updatedKeyData.value = decompressed
-
-				Store.setCurrentKey(keyName, updatedKeyData, rawSize)
-				HookManager.setActiveHook(hook.name)
-				Store.showToast("info", `Auto-detected: {hook.name}`)
-			else
-				Store.setCurrentKey(keyName, keyResult.value, rawSize)
+			local prepared = KeyViewLoader.prepare(keyResult.value, context, true)
+			Store.setCurrentKey(keyName, prepared.keyData, prepared.rawSize)
+			if prepared.hookName then
+				Store.showToast("info", `Auto-detected: {prepared.hookName}`)
 			end
 
+			Store.isReadOnly(false)
 			Store.setView("editKey")
 		else
-			Store.keyError(keyResult.error)
-			Store.showToast("error", `Failed to load key: {keyResult.error}`)
+			local errorMessage = if keyResult.success
+				then `Key "{keyName}" does not exist`
+				else keyResult.error
+			Store.keyError(errorMessage)
+			Store.showToast("error", `Failed to load key: {errorMessage}`)
 		end
 
 		Store.isLoadingKey(false)
+	end
+
+	local quickLoginIntoUserKey = function()
+		local localPlayer = Players.LocalPlayer
+		if not localPlayer or localPlayer.UserId <= 0 then
+			Store.showToast("warning", "LocalPlayer is unavailable. Start a local play session and try again.")
+			return
+		end
+
+		local userIdKey = tostring(localPlayer.UserId)
+		keyFilter(userIdKey)
+		triggerAutoLookup(userIdKey)
+
+		quickLoginLoading(true)
+		loadKey(userIdKey, true)
+		quickLoginLoading(false)
 	end
 
 	-- Load keys when the view is first shown
@@ -581,14 +578,57 @@ local function BrowseView(): Frame
 				PaddingBottom = UDim.new(0, 10),
 			},
 
-			TextInput({
-				value = keyFilter,
-				onChange = function(value)
-					keyFilter(value)
-					triggerAutoLookup(value)
-				end,
-				placeholder = "Search keys...",
-			}),
+			create "Frame" {
+				Size = UDim2.fromScale(1, 1),
+				BackgroundTransparency = 1,
+
+				create "UIListLayout" {
+					FillDirection = Enum.FillDirection.Horizontal,
+					VerticalAlignment = Enum.VerticalAlignment.Center,
+					Padding = UDim.new(0, 8),
+				},
+
+				create "Frame" {
+					LayoutOrder = 1,
+					Size = UDim2.new(1, -180, 1, 0),
+					BackgroundTransparency = 1,
+
+					TextInput({
+						value = keyFilter,
+						onChange = function(value)
+							keyFilter(value)
+							triggerAutoLookup(value)
+						end,
+						placeholder = "Search keys...",
+					}),
+				},
+
+				create "Frame" {
+					LayoutOrder = 2,
+					Size = UDim2.fromOffset(172, 36),
+					BackgroundTransparency = 1,
+
+					Button({
+						text = function()
+							if quickLoginLoading() then
+								return "Opening..."
+							end
+							if not canQuickLogin() then
+								return "No LocalPlayer"
+							end
+							return "Open My UserId"
+						end,
+						onClick = quickLoginIntoUserKey,
+						variant = "secondary",
+						icon = theme.icons.key,
+						disabled = function()
+							return quickLoginLoading() or not canQuickLogin()
+						end,
+						tooltip = "Quick-login to key named LocalPlayer.UserId",
+						fullWidth = true,
+					}),
+				},
+			},
 		},
 
 		-- Key list

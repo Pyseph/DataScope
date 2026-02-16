@@ -19,6 +19,7 @@ type Settings = Types.Settings
 type Toast = Types.Toast
 type UndoAction = Types.UndoAction
 type JSONValue = Types.JSONValue
+type DiffViewState = Types.DiffViewState
 
 local MAX_UNDO_STACK = 64
 local MAX_HISTORY_RECORDS = 32
@@ -99,6 +100,9 @@ Store.versionList = source({} :: { Types.VersionInfo })
 Store.versionListLoading = source(false)
 Store.hasMoreVersions = source(false)
 
+-- Diff view state (used by EditKeyView when comparing two versions)
+Store.diffView = source(nil :: DiffViewState?)
+
 -- History state
 Store.history = source({} :: { HistoryRecord })
 
@@ -177,6 +181,7 @@ function Store.disconnect()
 	Store.currentKey(nil)
 	Store.currentKeyData(nil)
 	Store.currentVersion(nil)
+	Store.diffView(nil)
 	Store.editedData(nil)
 	Store.hasUnsavedChanges(false)
 	Store.undoStack({})
@@ -193,6 +198,7 @@ function Store.setCurrentKey(key: string?, data: KeyData?, rawSize: number?)
 	Store.currentKey(key)
 	Store.currentKeyData(data)
 	Store.currentVersion(nil)
+	Store.diffView(nil)
 	
 	local clonedValue = data and Functional.deepClone(data.value) or nil
 
@@ -204,6 +210,14 @@ function Store.setCurrentKey(key: string?, data: KeyData?, rawSize: number?)
 	Store.searchResults({})
 	Store.currentSearchIndex(0)
 	Store.rawDataSize(rawSize)
+end
+
+function Store.setDiffView(state: DiffViewState?)
+	Store.diffView(state)
+end
+
+function Store.clearDiffView()
+	Store.diffView(nil)
 end
 
 function Store.setEditedData(data: JSONValue)

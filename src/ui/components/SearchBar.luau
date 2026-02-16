@@ -280,11 +280,6 @@ local function SearchBar(props: SearchBarProps): Frame
 		BackgroundTransparency = 1,
 		ClipsDescendants = false,
 
-		create "UIPadding" {
-			Name = "UIPadding",
-			PaddingLeft = UDim.new(0, 24),
-		},
-
 		-- Main search bar
 		create "Frame" {
 			Name = "SearchBarContainer",

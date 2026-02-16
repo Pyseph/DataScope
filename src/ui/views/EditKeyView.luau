@@ -26,6 +26,8 @@ local action = Vide.action
 local create = Vide.create
 local source = Vide.source
 local derive = Vide.derive
+local effect = Vide.effect
+local spring = Vide.spring
 
 type JSONValue = Types.JSONValue
 type SearchMode = Store.SearchMode
@@ -39,6 +41,22 @@ local function EditKeyView(): Frame
 	local codeEditorText = source("")
 	local showDeleteConfirm = source(false)
 	local scrollPath = source({} :: { string | number })
+	local viewWidth = source(900)
+	local isDiffMode = derive(function(): boolean
+		return Store.diffView() ~= nil
+	end)
+	local isCompact = derive(function(): boolean
+		return viewWidth() < 760
+	end)
+	local isTight = derive(function(): boolean
+		return viewWidth() < 620
+	end)
+	local isUltraTight = derive(function(): boolean
+		return viewWidth() < 520
+	end)
+	local metadataRowWeight = spring(function()
+		return if isCompact() then 0 else 1
+	end, 0.2)
 
 	-- Sync code editor with data
 	local updateCodeEditor = function()
@@ -233,9 +251,70 @@ local function EditKeyView(): Frame
 		{ id = "tree", label = "Tree" },
 		{ id = "code", label = "Code" },
 	}
+	local showToolbarTabs = derive(function(): boolean
+		return not isUltraTight()
+	end)
+	local showExpandControls = derive(function(): boolean
+		return viewMode() == "tree" and not isTight()
+	end)
+	local showUndoRedoControls = derive(function(): boolean
+		return not isCompact()
+	end)
+	local showExportAction = derive(function(): boolean
+		return not isTight()
+	end)
+	local showVersionsAction = derive(function(): boolean
+		return not isUltraTight()
+	end)
+	local showDeleteAction = derive(function(): boolean
+		return not isUltraTight()
+	end)
+	local showDividerAction = derive(function(): boolean
+		return not isCompact()
+	end)
+	local toolbarTabsWidth = spring(function()
+		return if showToolbarTabs() then 120 else 0
+	end, 0.2)
+	local toolbarExpandWidth = spring(function()
+		return if showExpandControls() then 60 else 0
+	end, 0.2)
+	local toolbarUndoWidth = spring(function()
+		return if showUndoRedoControls() then 60 else 0
+	end, 0.2)
+	local exportActionWidth = spring(function()
+		return if showExportAction() then 72 else 0
+	end, 0.2)
+	local versionsActionWidth = spring(function()
+		return if showVersionsAction() then 82 else 0
+	end, 0.2)
+	local deleteActionWidth = spring(function()
+		return if showDeleteAction() then 28 else 0
+	end, 0.2)
+	local dividerActionWidth = spring(function()
+		return if showDividerAction() then 1 else 0
+	end, 0.2)
+	local hasToolbarControls = derive(function(): boolean
+		return toolbarTabsWidth() > 1 or toolbarExpandWidth() > 1 or toolbarUndoWidth() > 1
+	end)
+
+	effect(function()
+		if isDiffMode() and viewMode() ~= "tree" then
+			task.defer(function()
+				viewMode("tree")
+			end)
+		end
+	end)
 
 	-- Format key metadata
 	local keyMetadata = derive(function(): string
+		local diffView = Store.diffView()
+		if diffView then
+			if isCompact() then
+				return "Diff mode • Added/Removed only"
+			end
+			return `Diff mode • A {string.sub(diffView.versionA, 1, 10)}... -> B {string.sub(diffView.versionB, 1, 10)}... • Added/Removed only`
+		end
+
 		local keyData = Store.currentKeyData()
 		if not keyData or not keyData.keyInfo then
 			return ""
@@ -273,6 +352,13 @@ local function EditKeyView(): Frame
 			return theme.colors().background
 		end,
 		BorderSizePixel = 0,
+
+		action(function(frame: Frame)
+			viewWidth(frame.AbsoluteSize.X)
+			frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+				viewWidth(frame.AbsoluteSize.X)
+			end)
+		end),
 
 		create "UIListLayout" {
 			SortOrder = Enum.SortOrder.LayoutOrder,
@@ -312,6 +398,18 @@ local function EditKeyView(): Frame
 					Image = "",
 
 					Activated = function()
+						if isDiffMode() then
+							Store.clearDiffView()
+							Store.isReadOnly(false)
+							Store.currentVersion(nil)
+							local keyData = Store.currentKeyData()
+							if keyData then
+								Store.editedData(Functional.deepClone(keyData.value))
+							end
+							Store.setView("versions")
+							return
+						end
+
 						if Store.hasUnsavedChanges() then
 							-- TODO: Show confirmation modal
 							Store.discardChanges()
@@ -369,19 +467,26 @@ local function EditKeyView(): Frame
 						FontFace = theme.fontMono,
 						TextEditable = false,
 						ClearTextOnFocus = false,
+						TextTruncate = Enum.TextTruncate.AtEnd,
 					},
 
 					create "TextLabel" {
 						LayoutOrder = 2,
-						Size = UDim2.new(1, 0, 0, 16),
+						Size = function()
+							return UDim2.new(1, 0, 0, 16 * metadataRowWeight())
+						end,
 						BackgroundTransparency = 1,
 						Text = keyMetadata,
 						TextColor3 = function()
 							return theme.colors().foregroundSecondary
 						end,
+						TextTransparency = function()
+							return 1 - metadataRowWeight()
+						end,
 						TextSize = theme.fontSize.small,
 						TextXAlignment = Enum.TextXAlignment.Left,
 						FontFace = theme.font,
+						TextTruncate = Enum.TextTruncate.AtEnd,
 					},
 				},
 
@@ -396,7 +501,9 @@ local function EditKeyView(): Frame
 					TextColor3 = Color3.new(0, 0, 0),
 					TextSize = theme.fontSize.small,
 					FontFace = theme.font,
-					Visible = Store.hasUnsavedChanges,
+					Visible = function()
+						return Store.hasUnsavedChanges() and not isCompact()
+					end,
 
 					create "UICorner" {
 						CornerRadius = UDim.new(0, 4),
@@ -418,42 +525,91 @@ local function EditKeyView(): Frame
 					},
 
 					-- Export button
-					Button({
-						text = "Export",
-						onClick = handleExport,
-						variant = "ghost",
-						size = "small",
-						tooltip = "Export to .luau file",
-					}),
+					create "Frame" {
+						Size = function()
+							return UDim2.fromOffset(exportActionWidth(), 32)
+						end,
+						BackgroundTransparency = 1,
+						ClipsDescendants = true,
+						Visible = function()
+							return showExportAction() or exportActionWidth() > 1
+						end,
+
+						Button({
+							text = "Export",
+							onClick = handleExport,
+							variant = "ghost",
+							size = "small",
+							tooltip = "Export to .luau file",
+							fullWidth = true,
+						}),
+					},
 
 					-- Versions button
-					Button({
-						text = "Versions",
-						onClick = function()
-							Store.setView("versions")
+					create "Frame" {
+						Size = function()
+							return UDim2.fromOffset(versionsActionWidth(), 32)
 						end,
-						variant = "ghost",
-						size = "small",
-						tooltip = "View version history",
-					}),
+						BackgroundTransparency = 1,
+						ClipsDescendants = true,
+						Visible = function()
+							return showVersionsAction() or versionsActionWidth() > 1
+						end,
+
+						Button({
+							text = "Versions",
+							onClick = function()
+								Store.setView("versions")
+							end,
+							variant = "ghost",
+							size = "small",
+							tooltip = "View version history",
+							fullWidth = true,
+						}),
+					},
 
 					-- Delete button
-					Button({
-						text = "",
-						onClick = handleDelete,
-						variant = "ghost",
-						icon = theme.icons.delete,
-						size = "small",
-						tooltip = "Delete this key",
-					}),
+					create "Frame" {
+						Size = function()
+							return UDim2.fromOffset(deleteActionWidth(), 32)
+						end,
+						BackgroundTransparency = 1,
+						ClipsDescendants = true,
+						Visible = function()
+							return showDeleteAction() or deleteActionWidth() > 1
+						end,
+
+						Button({
+							text = "",
+							onClick = function()
+								if not isDiffMode() then
+									handleDelete()
+								end
+							end,
+							variant = "ghost",
+							icon = theme.icons.delete,
+							size = "small",
+							tooltip = "Delete this key",
+							disabled = isDiffMode,
+							fullWidth = true,
+						}),
+					},
 
 					-- Divider
 					create "Frame" {
-						Size = UDim2.new(0, 1, 0, 20),
+						Size = function()
+							return UDim2.fromOffset(dividerActionWidth(), 20)
+						end,
 						BackgroundColor3 = function()
 							return theme.colors().border
 						end,
 						BorderSizePixel = 0,
+						BackgroundTransparency = function()
+							return if dividerActionWidth() > 0.5 then 0 else 1
+						end,
+						Visible = function()
+							return showDividerAction() or dividerActionWidth() > 0.1
+						end,
 					},
 
 					-- Save button
@@ -467,10 +623,10 @@ local function EditKeyView(): Frame
 						onClick = handleSave,
 						variant = function()
 							return if Store.hasUnsavedChanges() then "primary" else "secondary"
-						end,
+						end :: any,
 						size = "small",
 						disabled = function()
-							return not Store.hasUnsavedChanges() or Store.isSavingKey()
+							return isDiffMode() or not Store.hasUnsavedChanges() or Store.isSavingKey()
 						end,
 						tooltip = "Save changes (Ctrl+S)",
 					}),
@@ -489,8 +645,12 @@ local function EditKeyView(): Frame
 			BorderSizePixel = 0,
 
 			create "UIPadding" {
-				PaddingLeft = UDim.new(0, 12),
-				PaddingRight = UDim.new(0, 12),
+				PaddingLeft = function()
+					return UDim.new(0, if hasToolbarControls() then 12 else 0)
+				end,
+				PaddingRight = function()
+					return UDim.new(0, if hasToolbarControls() then 12 else 0)
+				end,
 				PaddingTop = UDim.new(0, 8),
 				PaddingBottom = UDim.new(0, 8),
 			},
@@ -504,14 +664,20 @@ local function EditKeyView(): Frame
 					FillDirection = Enum.FillDirection.Horizontal,
 					VerticalAlignment = Enum.VerticalAlignment.Center,
 					HorizontalAlignment = Enum.HorizontalAlignment.Right,
-					Padding = UDim.new(0, 12),
+					Padding = function()
+						return UDim.new(0, if hasToolbarControls() then 12 else 0)
+					end,
 				},
 
 				-- Search bar
 				create "Frame" {
 					LayoutOrder = 1,
-					Size = UDim2.new(1, -242, 1, 0),
+					Size = UDim2.new(0, 0, 1, 0),
 					BackgroundTransparency = 1,
+
+					create "UIFlexItem" {
+						FlexMode = Enum.UIFlexMode.Fill,
+					},
 
 					SearchBar({
 						value = Store.searchQuery,
@@ -528,16 +694,25 @@ local function EditKeyView(): Frame
 					}),
 				},
 
-				-- View mode tabs
 				create "Frame" {
 					LayoutOrder = 3,
-					Size = UDim2.fromOffset(120, 32),
+					Size = function()
+						return UDim2.fromOffset(toolbarTabsWidth(), 32)
+					end,
 					BackgroundTransparency = 1,
+					ClipsDescendants = true,
+					Visible = function()
+						return showToolbarTabs() or toolbarTabsWidth() > 1
+					end,
 
 					Tabs({
 						tabs = viewTabs,
 						activeTab = viewMode,
 						onTabChange = function(tab)
+							if isDiffMode() then
+								viewMode("tree")
+								return
+							end
 							viewMode(tab :: "tree" | "code")
 							if tab == "code" then
 								updateCodeEditor()
@@ -546,13 +721,15 @@ local function EditKeyView(): Frame
 					}),
 				},
 
-				-- Expand/Collapse buttons
 				create "Frame" {
 					LayoutOrder = 4,
-					Size = UDim2.fromOffset(60, 32),
+					Size = function()
+						return UDim2.fromOffset(toolbarExpandWidth(), 32)
+					end,
 					BackgroundTransparency = 1,
+					ClipsDescendants = true,
 					Visible = function()
-						return viewMode() == "tree"
+						return showExpandControls() or toolbarExpandWidth() > 1
 					end,
 
 					create "UIListLayout" {
@@ -561,70 +738,75 @@ local function EditKeyView(): Frame
 						Padding = UDim.new(0, 4),
 					},
 
-				create "ImageButton" {
-					Size = UDim2.fromOffset(28, 28),
-					BackgroundColor3 = function()
-						return theme.colors().backgroundTertiary
-					end,
-					Image = "",
-
-					Activated = expandAll,
-					
-					action(function(btn)
-						Tooltip.addTooltip(btn, "Expand all", "bottom")
-					end),
-
-					create "UICorner" {
-						CornerRadius = UDim.new(0, 4),
-					},
-					
-					create "ImageLabel" {
-						AnchorPoint = Vector2.new(0.5, 0.5),
-						Position = UDim2.fromScale(0.5, 0.5),
-						Size = UDim2.fromOffset(16, 16),
-						BackgroundTransparency = 1,
-						Image = theme.icons.expand,
-						ImageColor3 = function()
-							return theme.colors().foreground
+					create "ImageButton" {
+						Size = UDim2.fromOffset(28, 28),
+						BackgroundColor3 = function()
+							return theme.colors().backgroundTertiary
 						end,
+						Image = "",
+
+						Activated = expandAll,
+						
+						action(function(btn)
+							Tooltip.addTooltip(btn, "Expand all", "bottom")
+						end),
+
+						create "UICorner" {
+							CornerRadius = UDim.new(0, 4),
+						},
+						
+						create "ImageLabel" {
+							AnchorPoint = Vector2.new(0.5, 0.5),
+							Position = UDim2.fromScale(0.5, 0.5),
+							Size = UDim2.fromOffset(16, 16),
+							BackgroundTransparency = 1,
+							Image = theme.icons.expand,
+							ImageColor3 = function()
+								return theme.colors().foreground
+							end,
+						},
 					},
-				},
 
-				create "ImageButton" {
-					Size = UDim2.fromOffset(28, 28),
-					BackgroundColor3 = function()
-						return theme.colors().backgroundTertiary
-					end,
-					Image = "",
-
-					Activated = collapseAll,
-					
-					action(function(btn)
-						Tooltip.addTooltip(btn, "Collapse all", "bottom")
-					end),
-
-					create "UICorner" {
-						CornerRadius = UDim.new(0, 4),
-					},
-					
-					create "ImageLabel" {
-						AnchorPoint = Vector2.new(0.5, 0.5),
-						Position = UDim2.fromScale(0.5, 0.5),
-						Size = UDim2.fromOffset(16, 16),
-						BackgroundTransparency = 1,
-						Image = theme.icons.collapse,
-						ImageColor3 = function()
-							return theme.colors().foreground
+					create "ImageButton" {
+						Size = UDim2.fromOffset(28, 28),
+						BackgroundColor3 = function()
+							return theme.colors().backgroundTertiary
 						end,
+						Image = "",
+
+						Activated = collapseAll,
+						
+						action(function(btn)
+							Tooltip.addTooltip(btn, "Collapse all", "bottom")
+						end),
+
+						create "UICorner" {
+							CornerRadius = UDim.new(0, 4),
+						},
+						
+						create "ImageLabel" {
+							AnchorPoint = Vector2.new(0.5, 0.5),
+							Position = UDim2.fromScale(0.5, 0.5),
+							Size = UDim2.fromOffset(16, 16),
+							BackgroundTransparency = 1,
+							Image = theme.icons.collapse,
+							ImageColor3 = function()
+								return theme.colors().foreground
+							end,
+						},
 					},
 				},
-				},
 
-				-- Undo/Redo buttons
 				create "Frame" {
 					LayoutOrder = 5,
-					Size = UDim2.fromOffset(60, 32),
+					Size = function()
+						return UDim2.fromOffset(toolbarUndoWidth(), 32)
+					end,
 					BackgroundTransparency = 1,
+					ClipsDescendants = true,
+					Visible = function()
+						return showUndoRedoControls() or toolbarUndoWidth() > 1
+					end,
 
 					create "UIListLayout" {
 						FillDirection = Enum.FillDirection.Horizontal,
@@ -632,79 +814,79 @@ local function EditKeyView(): Frame
 						Padding = UDim.new(0, 4),
 					},
 
-				create "ImageButton" {
-					Size = UDim2.fromOffset(28, 28),
-					BackgroundColor3 = function()
-						return theme.colors().backgroundTertiary
-					end,
-					BackgroundTransparency = function()
-						return if Store.canUndo() then 0 else 0.5
-					end,
-					Image = "",
-
-					Activated = function()
-						if Store.canUndo() then
-							Store.undo()
-						end
-					end,
-					
-					action(function(btn)
-						Tooltip.addTooltip(btn, "Undo (Ctrl+Z)", "bottom")
-					end),
-
-					create "UICorner" {
-						CornerRadius = UDim.new(0, 4),
-					},
-					
-					create "ImageLabel" {
-						AnchorPoint = Vector2.new(0.5, 0.5),
-						Position = UDim2.fromScale(0.5, 0.5),
-						Size = UDim2.fromOffset(16, 16),
-						BackgroundTransparency = 1,
-						Image = theme.icons.undo,
-						ImageColor3 = function()
-							local c = theme.colors()
-							return if Store.canUndo() then c.foreground else c.foregroundMuted
+					create "ImageButton" {
+						Size = UDim2.fromOffset(28, 28),
+						BackgroundColor3 = function()
+							return theme.colors().backgroundTertiary
 						end,
-					},
-				},
-
-				create "ImageButton" {
-					Size = UDim2.fromOffset(28, 28),
-					BackgroundColor3 = function()
-						return theme.colors().backgroundTertiary
-					end,
-					BackgroundTransparency = function()
-						return if Store.canRedo() then 0 else 0.5
-					end,
-					Image = "",
-
-					Activated = function()
-						if Store.canRedo() then
-							Store.redo()
-						end
-					end,
-					
-					action(function(btn)
-						Tooltip.addTooltip(btn, "Redo (Ctrl+Y)", "bottom")
-					end),
-
-					create "UICorner" {
-						CornerRadius = UDim.new(0, 4),
-					},
-					
-					create "ImageLabel" {
-						AnchorPoint = Vector2.new(0.5, 0.5),
-						Position = UDim2.fromScale(0.5, 0.5),
-						Size = UDim2.fromOffset(16, 16),
-						BackgroundTransparency = 1,
-						Image = theme.icons.redo,
-						ImageColor3 = function()
-							local c = theme.colors()
-							return if Store.canRedo() then c.foreground else c.foregroundMuted
+						BackgroundTransparency = function()
+							return if Store.canUndo() then 0 else 0.5
 						end,
+						Image = "",
+
+						Activated = function()
+							if Store.canUndo() then
+								Store.undo()
+							end
+						end,
+						
+						action(function(btn)
+							Tooltip.addTooltip(btn, "Undo (Ctrl+Z)", "bottom")
+						end),
+
+						create "UICorner" {
+							CornerRadius = UDim.new(0, 4),
+						},
+						
+						create "ImageLabel" {
+							AnchorPoint = Vector2.new(0.5, 0.5),
+							Position = UDim2.fromScale(0.5, 0.5),
+							Size = UDim2.fromOffset(16, 16),
+							BackgroundTransparency = 1,
+							Image = theme.icons.undo,
+							ImageColor3 = function()
+								local c = theme.colors()
+								return if Store.canUndo() then c.foreground else c.foregroundMuted
+							end,
+						},
 					},
-				},
+
+					create "ImageButton" {
+						Size = UDim2.fromOffset(28, 28),
+						BackgroundColor3 = function()
+							return theme.colors().backgroundTertiary
+						end,
+						BackgroundTransparency = function()
+							return if Store.canRedo() then 0 else 0.5
+						end,
+						Image = "",
+
+						Activated = function()
+							if Store.canRedo() then
+								Store.redo()
+							end
+						end,
+						
+						action(function(btn)
+							Tooltip.addTooltip(btn, "Redo (Ctrl+Y)", "bottom")
+						end),
+
+						create "UICorner" {
+							CornerRadius = UDim.new(0, 4),
+						},
+						
+						create "ImageLabel" {
+							AnchorPoint = Vector2.new(0.5, 0.5),
+							Position = UDim2.fromScale(0.5, 0.5),
+							Size = UDim2.fromOffset(16, 16),
+							BackgroundTransparency = 1,
+							Image = theme.icons.redo,
+							ImageColor3 = function()
+								local c = theme.colors()
+								return if Store.canRedo() then c.foreground else c.foregroundMuted
+							end,
+						},
+					},
 				},
 			},
 		},
@@ -744,7 +926,7 @@ local function EditKeyView(): Frame
 				Size = UDim2.fromScale(1, 1),
 				BackgroundTransparency = 1,
 				Visible = function()
-					return viewMode() == "tree"
+						return viewMode() == "tree" or isDiffMode()
 				end,
 
 				create "UIListLayout" {
@@ -765,7 +947,13 @@ local function EditKeyView(): Frame
 					
 					Breadcrumbs.BreadcrumbsCompact({
 						path = function()
-							return scrollPath()
+							local currentPath = scrollPath()
+							if #currentPath == 0 then
+								return currentPath
+							end
+							local parentPath = table.clone(currentPath)
+							table.remove(parentPath, #parentPath)
+							return parentPath
 						end,
 						onNavigate = function(path)
 							-- Navigate to path (could scroll to it in future)
@@ -824,6 +1012,20 @@ local function EditKeyView(): Frame
 						useAlternatingColors = function()
 							return Store.settings().useAlternatingKeyColors
 						end,
+						diffPathKinds = function()
+							local diffView = Store.diffView()
+							if diffView then
+								return diffView.pathKinds
+							end
+							return {}
+						end,
+						visiblePathFilter = function()
+							local diffView = Store.diffView()
+							if diffView then
+								return diffView.pathFilter
+							end
+							return {}
+						end,
 					}),
 				},
 			},
@@ -833,7 +1035,7 @@ local function EditKeyView(): Frame
 				Size = UDim2.fromScale(1, 1),
 				BackgroundTransparency = 1,
 				Visible = function()
-					return viewMode() == "code"
+					return viewMode() == "code" and not isDiffMode()
 				end,
 
 				create "UIPadding" {

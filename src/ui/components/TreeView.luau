@@ -1,7 +1,7 @@
 --!strict
 --[[
 	TreeView Component
-	Hierarchical JSON data visualization with editing support using Vide
+	Hierarchical JSON data visualization with editing support
 ]]
 
 local Vide = require(script.Parent.Parent.Parent.Packages.Vide)
@@ -13,8 +13,6 @@ local VirtualizedList = require(script.Parent.VirtualizedList)
 local create = Vide.create
 local source = Vide.source
 local derive = Vide.derive
-local indexes = Vide.indexes
-local spring = Vide.spring
 local action = Vide.action
 local effect = Vide.effect
 local untrack = Vide.untrack
@@ -22,6 +20,7 @@ local show = Vide.show
 
 type JSONValue = Types.JSONValue
 type TreeNode = Types.TreeNode
+type DiffFieldKind = Types.DiffFieldKind
 
 export type TreeViewProps = {
 	data: () -> JSONValue,
@@ -38,6 +37,8 @@ export type TreeViewProps = {
 	onExpandPaths: ((paths: { { string | number } }) -> ())?,
 	useAlternatingColors: (() -> boolean)?,
 	onScrollPathChange: ((path: { string | number }) -> ())?,
+	diffPathKinds: (() -> { [string]: DiffFieldKind })?,
+	visiblePathFilter: (() -> { [string]: boolean })?,
 }
 
 -- Helper to get value type for display
@@ -114,6 +115,41 @@ local function pathToKey(path: { string | number }): string
 	return table.concat(parts, ".")
 end
 
+local function isPathInFilter(pathKey: string, filter: { [string]: boolean }): boolean
+	if filter[pathKey] then
+		return true
+	end
+
+	for filterPath in filter do
+		if string.sub(filterPath, 1, #pathKey + 1) == pathKey .. "." then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function getPathHighlightKind(path: { string | number }, highlights: { [string]: DiffFieldKind }): DiffFieldKind?
+	local exact = highlights[pathToKey(path)]
+	if exact then
+		return exact :: DiffFieldKind
+	end
+
+	-- Fallback to nearest marked ancestor for branch-level highlights.
+	for i = #path - 1, 1, -1 do
+		local ancestor = {}
+		for j = 1, i do
+			table.insert(ancestor, path[j])
+		end
+		local ancestorKind = highlights[pathToKey(ancestor)]
+		if ancestorKind then
+			return ancestorKind :: DiffFieldKind
+		end
+	end
+
+	return nil
+end
+
 -- Check if path matches search result
 local function pathMatches(path: { string | number }, searchPath: { string | number }): boolean
 	if #path ~= #searchPath then
@@ -146,7 +182,7 @@ local function highlightText(text: string, query: string, color: Color3): string
 	local lowerText = string.lower(text)
 	local lowerQuery = string.lower(query)
 	local start, finish = string.find(lowerText, lowerQuery, 1, true)
-	if not start then return text end
+	if not start or not finish then return text end
 	
 	local before = string.sub(text, 1, start - 1)
 	local match = string.sub(text, start, finish)
@@ -154,6 +190,14 @@ local function highlightText(text: string, query: string, color: Color3): string
 	
 	local colorHex = string.format("#%02x%02x%02x", color.R * 255, color.G * 255, color.B * 255)
 	return `{before}<font color="{colorHex}"><b>{match}</b></font>{after}`
+end
+
+local function tintColor(base: Color3, tint: Color3, amount: number): Color3
+	return Color3.new(
+		base.R + (tint.R - base.R) * amount,
+		base.G + (tint.G - base.G) * amount,
+		base.B + (tint.B - base.B) * amount
+	)
 end
 
 local function TreeView(props: TreeViewProps): Frame
@@ -171,11 +215,11 @@ local function TreeView(props: TreeViewProps): Frame
 
 	-- Local state for expanded paths if not provided
 	local localExpandedPaths = source({} :: { [string]: boolean })
-	local expandedPaths = props.expandedPaths or function()
+	local expandedPaths: () -> { [string]: boolean } = props.expandedPaths or function()
 		return localExpandedPaths()
 	end
 
-	local toggleExpand = props.onToggleExpand or function(path: { string | number })
+	local toggleExpand: ({ string | number }) -> () = props.onToggleExpand or function(path: { string | number })
 		local key = pathToKey(path)
 		local current = localExpandedPaths()
 		local newPaths = Functional.deepClone(current)
@@ -183,24 +227,32 @@ local function TreeView(props: TreeViewProps): Frame
 		localExpandedPaths(newPaths)
 	end
 
-	local readOnly = props.readOnly or function()
+	local readOnly: () -> boolean = props.readOnly or function()
 		return false
 	end
 
-	local searchQuery = props.searchQuery or function()
+	local searchQuery: () -> string = props.searchQuery or function()
 		return ""
 	end
 
-	local searchResults = props.searchResults or function()
+	local searchResults: () -> { { string | number } } = props.searchResults or function()
 		return {}
 	end
 
-	local currentSearchResult = props.currentSearchResult or function()
+	local currentSearchResult: () -> { string | number }? = props.currentSearchResult or function()
 		return nil
 	end
 
-	local useAlternatingColors = props.useAlternatingColors or function()
+	local useAlternatingColors: () -> boolean = props.useAlternatingColors or function()
 		return false
+	end
+
+	local diffPathKinds: () -> { [string]: DiffFieldKind } = props.diffPathKinds or function()
+		return {} :: { [string]: DiffFieldKind }
+	end
+
+	local visiblePathFilter: () -> { [string]: boolean } = props.visiblePathFilter or function()
+		return {} :: { [string]: boolean }
 	end
 
 	-- Flatten tree for virtualized rendering (optimized)
@@ -215,6 +267,8 @@ local function TreeView(props: TreeViewProps): Frame
 		local results = searchResults()
 		local query = string.lower(searchQuery())
 		local hasQuery = query ~= ""
+		local pathFilter = visiblePathFilter()
+		local hasPathFilter = next(pathFilter) ~= nil
 		
 		-- Pre-compute search result path keys for faster lookup
 		local searchPathKeys: { [string]: boolean } = {}
@@ -260,6 +314,10 @@ local function TreeView(props: TreeViewProps): Frame
 				-- Only clone path when we need to store it in the node
 				table.insert(path, key)
 				local childPath = table.clone(path) -- table.clone is faster than deepClone for flat arrays
+				if hasPathFilter and not isPathInFilter(childPathKey, pathFilter) then
+					table.remove(path)
+					continue
+				end
 
 				local isExpanded = expanded[childPathKey] == true
 				local valueType = getValueType(childValue)
@@ -368,6 +426,14 @@ local function TreeView(props: TreeViewProps): Frame
 			local currentResult = currentSearchResult()
 			return currentResult ~= nil and pathMatches(n.path, currentResult)
 		end)
+
+		local nodeHighlightKind = derive(function(): DiffFieldKind?
+			local n = node()
+			if n == nil then
+				return nil
+			end
+			return getPathHighlightKind(n.path, diffPathKinds())
+		end)
 		
 		-- Base background color (for hover/alternating, animated with spring)
 		local baseBackgroundColor = derive(function()
@@ -392,9 +458,16 @@ local function TreeView(props: TreeViewProps): Frame
 		
 		-- Final background color: search highlight is instant (no spring), hover uses spring
 		local backgroundColor = derive(function()
+			local c = theme.colors()
+			local highlightKind = nodeHighlightKind()
+			if highlightKind == "added" then
+				return tintColor(baseBackgroundColor(), c.success, 0.2)
+			elseif highlightKind == "removed" then
+				return tintColor(baseBackgroundColor(), c.error, 0.2)
+			end
+
 			if isCurrentResult() then
 				-- Search result highlight is instant, no animation
-				local c = theme.colors()
 				local h, s, v = c.accent:ToHSV()
 				return Color3.fromHSV(h, s * 0.6, v * 0.35)
 			end
@@ -407,6 +480,13 @@ local function TreeView(props: TreeViewProps): Frame
 			local n = node()
 			if n == nil then
 				return c.foregroundMuted
+			end
+
+			local highlightKind = nodeHighlightKind()
+			if highlightKind == "added" then
+				return c.success
+			elseif highlightKind == "removed" then
+				return c.error
 			end
 			
 			-- Dim empty objects/arrays
@@ -674,6 +754,12 @@ local function TreeView(props: TreeViewProps): Frame
 						local c = theme.colors()
 						local n = node()
 						if n == nil then return c.foreground end
+						local highlightKind = nodeHighlightKind()
+						if highlightKind == "added" then
+							return c.success
+						elseif highlightKind == "removed" then
+							return c.error
+						end
 						if isCurrentResult() then
 							return c.foreground
 						end
@@ -811,6 +897,67 @@ local function TreeView(props: TreeViewProps): Frame
 			end),
 
 			-- Child count badge (positioned on the right)
+			create "TextLabel" {
+				Name = "DiffBadge",
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -40, 0.5, 0),
+				Size = UDim2.fromOffset(15, 15),
+				BackgroundColor3 = function()
+					local c = theme.colors()
+					local kind = nodeHighlightKind()
+					if kind == "added" then
+						return c.success
+					elseif kind == "removed" then
+						return c.error
+					end
+					return c.backgroundTertiary
+				end,
+				BackgroundTransparency = 0.84,
+				Text = function()
+					local kind = nodeHighlightKind()
+					if kind == "added" then
+						return "+"
+					elseif kind == "removed" then
+						return "-"
+					end
+					return ""
+				end,
+				TextColor3 = function()
+					local c = theme.colors()
+					local kind = nodeHighlightKind()
+					if kind == "added" then
+						return c.success
+					elseif kind == "removed" then
+						return c.error
+					end
+					return c.foregroundMuted
+				end,
+				TextSize = theme.fontSize.xs,
+				FontFace = theme.fontMedium,
+				Visible = function()
+					return nodeHighlightKind() ~= nil
+				end,
+
+				create "UICorner" {
+					CornerRadius = UDim.new(1, 0),
+				},
+
+				create "UIStroke" {
+					Color = function()
+						local c = theme.colors()
+						local kind = nodeHighlightKind()
+						if kind == "added" then
+							return c.success
+						elseif kind == "removed" then
+							return c.error
+						end
+						return c.border
+					end,
+					Transparency = 0.35,
+					Thickness = 1,
+				},
+			},
+
 			create "TextLabel" {
 				Name = "ChildCountBadge",
 				AnchorPoint = Vector2.new(1, 0.5),
@@ -1153,9 +1300,7 @@ local function TreeView(props: TreeViewProps): Frame
 					ZIndex = 102,
 					
 					Activated = function()
-						if props.onToggleExpand then
-							props.onToggleExpand(n.path)
-						end
+						toggleExpand(n.path)
 						closeContextMenu()
 					end,
 					
