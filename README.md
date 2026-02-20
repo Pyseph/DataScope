@@ -12,7 +12,7 @@
 
 ## Features
 
-### Core Features (from original)
+### Core Features
 - **Visual DataStore Management** - Browse and edit DataStores with a clean GUI
 - **Multiple DataStore Types** - Support for Normal, Ordered, and Global DataStores
 - **Key Browsing** - List, search, and filter keys with pagination
@@ -44,7 +44,6 @@
 ### Architecture
 - **Vide** - Reactive UI library for clean, declarative components
 - **Functional Programming** - Pure functions, immutable state, composition
-- **Clean Separation** - UI components, state management, and DataStore operations are clearly separated
 
 ## Installation
 
