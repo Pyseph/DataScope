@@ -9,7 +9,8 @@
       "WebSearch",
       "WebFetch(domain:wally.run)",
       "Bash(wally search:*)",
-      "Bash(rojo build:*)"
+      "Bash(rojo build:*)",
+      "Bash(python3 -c \":*)"
     ]
   }
 }

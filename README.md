@@ -31,7 +31,8 @@
   - **Keys** - Search only key names
   - **Values** - Search only values
   - **Type** - Search by data type (string, number, boolean, array, object, null, buffer)
-  - **Regex** - Search using Lua patterns
+  - **`.*` Regex toggle** - Independent toggle that enables Lua pattern matching in any mode
+  - **🕵️ Field History Scanner** - Track when a specific field in a player's data changed over time. Type a field path (e.g. `coins` or `inventory.sword`) into the search bar at the top of the version history panel, and it scans through every saved version to find exactly where that value changed — showing before and after for each change, with a button to open a full diff. Loads additional pages on demand via a "Scan more" button.
 
 - **🪝 Hook System** - Compression/decompression hooks for DataStore values:
   - JSON String detection and decoding
@@ -40,11 +41,6 @@
   - MessagePack format detection
   - ProfileService data format
   - **Custom hooks** - Register your own compression/serialization hooks
-
-- **🔀 Improved Diff View** - Version comparison now shows all changes, not just added/removed fields:
-  - **Value changes** (`~`) are now highlighted in yellow alongside additions (`+`) and removals (`-`)
-  - Type changes between versions are also captured
-  - Diff view auto-expands ancestor nodes on open so every change is immediately visible without manual expansion
 
 ### Architecture
 - **Vide** - Reactive UI library for clean, declarative components
@@ -58,7 +54,7 @@ https://create.roblox.com/store/asset/87717019449403/DataScope
 ### Using Wally
 ```toml
 [dependencies]
-DataScope = "pyseph/datascope@1.0.0"
+DataScope = "pyseph/datascope@1.3.0"
 ```
 
 ### Manual Installation
@@ -95,9 +91,11 @@ src/
 │       ├── ConnectView.luau
 │       ├── BrowseView.luau
 │       ├── EditKeyView.luau
+│       ├── VersionsView.luau
 │       └── SettingsView.luau
 ├── utils/
 │   ├── Functional.luau    # FP utilities (map, filter, reduce, etc.)
+│   ├── PatternMatcher.luau # Optimized search engine (~3-4x faster than native regex)
 │   └── JSON.luau          # JSON utilities
 └── settings/
     └── Settings.luau      # Settings persistence
@@ -145,7 +143,8 @@ The search bar supports multiple modes for finding data:
 | Keys | Only search key names | `inventory` finds keys containing "inventory" |
 | Values | Only search values | `100` finds values containing "100" |
 | Type | Search by data type | `array` finds all arrays |
-| Regex | Lua pattern matching | `^player%d+` finds keys starting with "player" + digits |
+
+Enable the **`.*` toggle** to use Lua pattern matching in any of the above modes. For example, `^player%d+` in Keys mode finds keys starting with "player" followed by digits.
 
 ## Credits
 

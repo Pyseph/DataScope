@@ -40,7 +40,7 @@ local function ToastItem(toast: Toast, onDismiss: (id: string) -> (), index: num
 	effect(function()
 		if toast.duration and toast.duration > 0 then
 			local startTime = os.clock()
-			local duration = toast.duration / 1000 -- Convert to seconds
+			local duration = toast.duration
 			
 			local connection: RBXScriptConnection
 			connection = game:GetService("RunService").Heartbeat:Connect(function()
@@ -270,7 +270,7 @@ local function ToastItem(toast: Toast, onDismiss: (id: string) -> (), index: num
 				Size = function()
 					return UDim2.new(progress(), 0, 0, 3)
 				end,
-				Position = UDim2.new(0, 0, 1, -3),
+				Position = UDim2.new(0, 0, 1, 9),
 				BackgroundColor3 = function()
 					return colors().bg
 				end,

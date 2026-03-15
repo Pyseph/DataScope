@@ -707,19 +707,30 @@ local function EditKeyView(): Frame
 						FlexMode = Enum.UIFlexMode.Fill,
 					},
 
-					SearchBar({
-						value = Store.searchQuery,
-						onChange = Store.setSearchQuery,
-						mode = Store.searchMode,
-						onModeChange = Store.setSearchMode,
-						resultCount = Store.searchResultCount,
-						currentResult = Store.currentSearchIndex,
-						onNextResult = Store.nextSearchResult,
-						onPrevResult = Store.prevSearchResult,
-						onClear = function()
-							Store.setSearchQuery("")
-						end,
-					}),
+				SearchBar({
+					value = Store.searchQuery,
+					onChange = Store.setSearchQuery,
+					mode = Store.searchMode,
+					onModeChange = Store.setSearchMode,
+					useRegex = Store.useRegex,
+					onRegexToggle = function()
+						Store.setUseRegex(not Store.useRegex())
+					end,
+					resultCount = Store.searchResultCount,
+					currentResult = Store.currentSearchIndex,
+					onNextResult = Store.nextSearchResult,
+					onPrevResult = Store.prevSearchResult,
+					onClear = function()
+						Store.setSearchQuery("")
+					end,
+					patternError = function(): string?
+						if Store.useRegex() then
+							local err = Store.searchError()
+							return if err ~= "" then err else nil
+						end
+						return nil
+					end,
+				}),
 				},
 
 				create "Frame" {

@@ -20,6 +20,7 @@ local source = Vide.source
 local derive = Vide.derive
 local indexes = Vide.indexes
 local spring = Vide.spring
+local action = Vide.action
 
 type VersionInfo = Types.VersionInfo
 type KeyData = Types.KeyData
@@ -32,6 +33,21 @@ local function VersionsView(): Frame
 	local compareVersionB = source(nil :: string?)
 	local compareLoading = source(false)
 	local versionDataCache = source({} :: { [string]: KeyData })
+
+	-- Field history scanner state
+	type ScanResult = {
+		newerVersion: VersionInfo,
+		olderVersion: VersionInfo,
+		entry: DiffEntry,
+	}
+	local trackPath = source("")
+	local isScanning = source(false)
+	local scanCancelled = source(false)
+	local scanResults = source({} :: { ScanResult })
+	local scanProgress = source(0)
+	local scanTotal = source(0)
+	local hasScanned = source(false)
+	local scanVersionCount = source(0) -- total version pairs compared so far
 
 	-- Load versions
 	local loadVersions = function()
@@ -300,6 +316,201 @@ local function VersionsView(): Frame
 		compareVersionA(nil)
 		compareVersionB(nil)
 	end
+
+	local function pathMatchesQuery(entryKey: string, query: string): boolean
+		-- Exact match or query is an ancestor prefix
+		if entryKey == query or string.sub(entryKey, 1, #query + 1) == query .. "." then
+			return true
+		end
+		-- query is a suffix (deeply nested field name or sub-path)
+		if string.sub(entryKey, -#query) == query then
+			local charBefore = string.sub(entryKey, -(#query + 1), -(#query + 1))
+			if charBefore == "." or charBefore == "" then
+				return true
+			end
+		end
+		return false
+	end
+
+	local function startFieldScan()
+		local currentPath = trackPath()
+		if currentPath == "" or isScanning() then
+			return
+		end
+
+		local versions = Store.versionList()
+		if #versions < 2 then
+			Store.showToast("info", "Need at least 2 versions to compare")
+			return
+		end
+
+		isScanning(true)
+		scanCancelled(false)
+		scanResults({})
+		scanProgress(0)
+		scanTotal(#versions - 1)
+		hasScanned(false)
+
+		task.spawn(function()
+			local scanned = 0
+			for i = 1, #versions - 1 do
+				if scanCancelled() then
+					break
+				end
+
+				local newerVersion = versions[i]
+				local olderVersion = versions[i + 1]
+
+				local okNewer, dataNewer = getPreparedVersionData(newerVersion.version, false)
+				local okOlder, dataOlder = getPreparedVersionData(olderVersion.version, false)
+
+				if okNewer and okOlder and dataNewer and dataOlder then
+					local entries = Diff.compute(dataOlder.value, dataNewer.value)
+					for _, entry in entries do
+						local entryKey = pathToKey(entry.path)
+						if pathMatchesQuery(entryKey, currentPath) then
+							local current = scanResults()
+							local newResults = table.clone(current)
+							table.insert(newResults, {
+								newerVersion = newerVersion,
+								olderVersion = olderVersion,
+								entry = entry,
+							})
+							scanResults(newResults)
+						end
+					end
+				end
+
+				scanned += 1
+				scanProgress(i)
+				task.wait()
+			end
+
+		scanVersionCount(scanned)
+		hasScanned(true)
+		isScanning(false)
+	end)
+end
+
+local function stopFieldScan()
+	scanCancelled(true)
+end
+
+local function clearFieldScan()
+	stopFieldScan()
+	trackPath("")
+	scanResults({})
+	scanProgress(0)
+	scanTotal(0)
+	hasScanned(false)
+	scanVersionCount(0)
+end
+
+-- Load the next page of versions (uses oldest known version's timestamp as upper bound)
+local function loadMoreVersions(): boolean
+	local connection = Store.connection()
+	local keyName = Store.currentKey()
+	if not connection or not keyName then
+		return false
+	end
+
+	local currentVersions = Store.versionList()
+	if #currentVersions == 0 then
+		return false
+	end
+
+	local oldestVersion = currentVersions[#currentVersions]
+
+	local dsResult = Operations.getDataStore(connection)
+	if not dsResult.success then
+		Store.showToast("error", `Failed to get DataStore: {dsResult.error}`)
+		return false
+	end
+
+	local datastore = dsResult.value :: DataStore
+	-- maxDate - 1 to exclude the oldest version we already have
+	local result = Operations.listVersions(
+		datastore,
+		keyName,
+		Enum.SortDirection.Descending,
+		nil,
+		oldestVersion.createdTime - 1
+	)
+
+	if result.success and #result.value.versions > 0 then
+		local combined = table.clone(currentVersions)
+		for _, v in result.value.versions do
+			table.insert(combined, v)
+		end
+		Store.versionList(combined)
+		Store.hasMoreVersions(result.value.hasMore)
+		return true
+	end
+
+	Store.hasMoreVersions(false)
+	return false
+end
+
+-- Continue scanning after loading another page of versions
+local function extendScan()
+	local currentPath = trackPath()
+	if currentPath == "" or isScanning() then
+		return
+	end
+
+	local prevCount = #Store.versionList()
+
+	isScanning(true)
+	scanCancelled(false)
+
+	task.spawn(function()
+		local loaded = loadMoreVersions()
+		if not loaded then
+			Store.showToast("info", "No more versions available to scan")
+			isScanning(false)
+			return
+		end
+
+		local versions = Store.versionList()
+		scanTotal(#versions - 1)
+
+		for i = prevCount, #versions - 1 do
+			if scanCancelled() then
+				break
+			end
+
+			local newerVersion = versions[i]
+			local olderVersion = versions[i + 1]
+
+			local okNewer, dataNewer = getPreparedVersionData(newerVersion.version, false)
+			local okOlder, dataOlder = getPreparedVersionData(olderVersion.version, false)
+
+			if okNewer and okOlder and dataNewer and dataOlder then
+				local entries = Diff.compute(dataOlder.value, dataNewer.value)
+				for _, entry in entries do
+					local entryKey = pathToKey(entry.path)
+					if pathMatchesQuery(entryKey, currentPath) then
+						local current = scanResults()
+						local newResults = table.clone(current)
+						table.insert(newResults, {
+							newerVersion = newerVersion,
+							olderVersion = olderVersion,
+							entry = entry,
+						})
+						scanResults(newResults)
+					end
+				end
+			end
+
+			scanProgress(i)
+			task.wait()
+		end
+
+		scanVersionCount(#versions - 1)
+		hasScanned(true)
+		isScanning(false)
+	end)
+end
 
 	-- Load a specific version
 	local loadVersion = function(version: string)
@@ -672,6 +883,168 @@ local function VersionsView(): Frame
 		}
 	end
 
+	-- Scan result row component
+	local ScanResultRow = function(result: () -> ScanResult, index: number): Frame
+		return create "Frame" {
+			LayoutOrder = index,
+			Size = UDim2.new(1, 0, 0, 52),
+			BackgroundColor3 = function()
+				local c = theme.colors()
+				return if index % 2 == 0 then c.backgroundSecondary else c.background
+			end,
+			BorderSizePixel = 0,
+
+			create "UIPadding" {
+				PaddingLeft = UDim.new(0, 16),
+				PaddingRight = UDim.new(0, 10),
+			},
+
+			create "UIListLayout" {
+				FillDirection = Enum.FillDirection.Horizontal,
+				VerticalAlignment = Enum.VerticalAlignment.Center,
+				Padding = UDim.new(0, 10),
+			},
+
+			-- Kind badge
+			create "Frame" {
+				LayoutOrder = 1,
+				Size = UDim2.fromOffset(22, 22),
+				BackgroundColor3 = function()
+					local c = theme.colors()
+					local kind = result().entry.kind
+					if kind == "added" then return c.success
+					elseif kind == "removed" then return c.error
+					else return c.warning end
+				end,
+				BackgroundTransparency = 0.8,
+
+				create "UICorner" {
+					CornerRadius = UDim.new(1, 0),
+				},
+
+				create "UIStroke" {
+					Color = function()
+						local c = theme.colors()
+						local kind = result().entry.kind
+						if kind == "added" then return c.success
+						elseif kind == "removed" then return c.error
+						else return c.warning end
+					end,
+					Transparency = 0.4,
+					Thickness = 1,
+				},
+
+				create "TextLabel" {
+					Size = UDim2.fromScale(1, 1),
+					BackgroundTransparency = 1,
+					Text = function()
+						local kind = result().entry.kind
+						if kind == "added" then return "+"
+						elseif kind == "removed" then return "-"
+						else return "~" end
+					end,
+					TextColor3 = function()
+						local c = theme.colors()
+						local kind = result().entry.kind
+						if kind == "added" then return c.success
+						elseif kind == "removed" then return c.error
+						else return c.warning end
+					end,
+					TextSize = theme.fontSize.small,
+					FontFace = theme.fontBold,
+				},
+			},
+
+			-- Path and before → after preview
+			create "Frame" {
+				LayoutOrder = 2,
+				Size = UDim2.new(0, 100, 1, 0),
+				BackgroundTransparency = 1,
+
+				create "UIFlexItem" {
+					FlexMode = Enum.UIFlexMode.Fill,
+				},
+
+				create "UIListLayout" {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					VerticalAlignment = Enum.VerticalAlignment.Center,
+					Padding = UDim.new(0, 2),
+				},
+
+				create "TextLabel" {
+					LayoutOrder = 1,
+					Size = UDim2.new(1, 0, 0, 18),
+					BackgroundTransparency = 1,
+					Text = function()
+						return pathToKey(result().entry.path)
+					end,
+					TextColor3 = function()
+						return theme.colors().foreground
+					end,
+					TextSize = theme.fontSize.small,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					FontFace = theme.fontMono,
+					TextTruncate = Enum.TextTruncate.AtEnd,
+				},
+
+				create "TextLabel" {
+					LayoutOrder = 2,
+					Size = UDim2.new(1, 0, 0, 16),
+					BackgroundTransparency = 1,
+					Text = function()
+						local entry = result().entry
+						local before = Diff.previewValue(entry.before, 35)
+						local after = Diff.previewValue(entry.after, 35)
+						return `{before} → {after}`
+					end,
+					TextColor3 = function()
+						return theme.colors().foregroundMuted
+					end,
+					TextSize = theme.fontSize.small,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					FontFace = theme.fontMono,
+					TextTruncate = Enum.TextTruncate.AtEnd,
+				},
+			},
+
+			-- Timestamp of the newer version
+			create "TextLabel" {
+				LayoutOrder = 3,
+				Size = UDim2.fromOffset(128, 32),
+				BackgroundTransparency = 1,
+				Text = function()
+					return formatTime(result().newerVersion.createdTime)
+				end,
+				TextColor3 = function()
+					return theme.colors().foregroundMuted
+				end,
+				TextSize = theme.fontSize.small,
+				TextXAlignment = Enum.TextXAlignment.Right,
+				FontFace = theme.font,
+			},
+
+			-- Diff button
+			create "Frame" {
+				LayoutOrder = 4,
+				Size = UDim2.fromOffset(52, 28),
+				BackgroundTransparency = 1,
+
+				Button({
+					text = "Diff",
+					onClick = function()
+						local r = result()
+						compareVersionA(r.olderVersion.version)
+						compareVersionB(r.newerVersion.version)
+						openDiffInEditor()
+					end,
+					variant = "secondary",
+					size = "small",
+					fullWidth = true,
+				}),
+			},
+		}
+	end
+
 	return create "Frame" {
 		Size = UDim2.fromScale(1, 1),
 		BackgroundColor3 = function()
@@ -707,33 +1080,41 @@ local function VersionsView(): Frame
 					Padding = UDim.new(0, 16),
 				},
 
-				-- Back button
-				create "ImageButton" {
-					LayoutOrder = 1,
-					Size = UDim2.fromOffset(36, 36),
-					BackgroundColor3 = function()
-						return theme.colors().backgroundTertiary
-					end,
+			-- Back button
+			create "ImageButton" {
+				LayoutOrder = 1,
+				Size = UDim2.fromOffset(32, 32),
+				BackgroundColor3 = function()
+					return theme.colors().backgroundTertiary
+				end,
+				Image = "",
+
+				Activated = function()
+					Store.isReadOnly(false)
+					Store.currentVersion(nil)
+					-- Reload current version
+					local keyData = Store.currentKeyData()
+					if keyData then
+						Store.editedData(keyData.value)
+					end
+					Store.setView("editKey")
+				end,
+
+				create "UICorner" {
+					CornerRadius = UDim.new(0, 6),
+				},
+
+				create "ImageLabel" {
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Position = UDim2.fromScale(0.5, 0.5),
+					Size = UDim2.fromOffset(18, 18),
+					BackgroundTransparency = 1,
 					Image = theme.icons.back,
 					ImageColor3 = function()
 						return theme.colors().foreground
 					end,
-
-					Activated = function()
-						Store.isReadOnly(false)
-						Store.currentVersion(nil)
-						-- Reload current version
-						local keyData = Store.currentKeyData()
-						if keyData then
-							Store.editedData(keyData.value)
-						end
-						Store.setView("editKey")
-					end,
-
-					create "UICorner" {
-						CornerRadius = UDim.new(0, 8),
-					},
 				},
+			},
 
 				-- Title
 				create "Frame" {
@@ -960,7 +1341,7 @@ local function VersionsView(): Frame
 					Button({
 						text = "Clear",
 						onClick = clearComparedVersions,
-						variant = "ghost",
+						variant = "primary",
 						size = "small",
 						disabled = function()
 							return compareLoading() or (compareVersionA() == nil and compareVersionB() == nil)
@@ -971,10 +1352,145 @@ local function VersionsView(): Frame
 			},
 		},
 
-		-- Version list
-		create "ScrollingFrame" {
+		-- Field history track bar
+		create "Frame" {
 			LayoutOrder = 3,
-			Size = UDim2.new(1, 0, 1, -174),
+			Size = UDim2.new(1, 0, 0, 44),
+			BackgroundColor3 = function()
+				return theme.colors().background
+			end,
+			BorderSizePixel = 0,
+
+			create "UIPadding" {
+				PaddingLeft = UDim.new(0, 12),
+				PaddingRight = UDim.new(0, 12),
+				PaddingTop = UDim.new(0, 6),
+				PaddingBottom = UDim.new(0, 6),
+			},
+
+			create "UIListLayout" {
+				FillDirection = Enum.FillDirection.Horizontal,
+				VerticalAlignment = Enum.VerticalAlignment.Center,
+				Padding = UDim.new(0, 8),
+			},
+
+			-- Path input
+			create "Frame" {
+				LayoutOrder = 1,
+				Size = UDim2.new(0, 100, 1, 0),
+				BackgroundColor3 = function()
+					return theme.colors().backgroundSecondary
+				end,
+				BorderSizePixel = 0,
+
+				create "UIFlexItem" {
+					FlexMode = Enum.UIFlexMode.Fill,
+				},
+
+				create "UICorner" {
+					CornerRadius = UDim.new(0, 6),
+				},
+
+				create "UIPadding" {
+					PaddingLeft = UDim.new(0, 10),
+					PaddingRight = UDim.new(0, 10),
+				},
+
+				create "TextBox" {
+					Size = UDim2.fromScale(1, 1),
+					BackgroundTransparency = 1,
+					Text = function()
+						return trackPath()
+					end,
+					PlaceholderText = "Track a field path, e.g. player.coins",
+					PlaceholderColor3 = function()
+						return theme.colors().foregroundMuted
+					end,
+					TextColor3 = function()
+						return theme.colors().foreground
+					end,
+					TextSize = theme.fontSize.normal,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					FontFace = theme.fontMono,
+					ClearTextOnFocus = false,
+
+					action(function(tb: TextBox)
+						tb:GetPropertyChangedSignal("Text"):Connect(function()
+							if tb:IsFocused() then
+								trackPath(tb.Text)
+							end
+						end)
+						tb.FocusLost:Connect(function(enterPressed: boolean)
+							trackPath(tb.Text)
+							if enterPressed then
+								startFieldScan()
+							end
+						end)
+					end),
+				},
+			},
+
+			-- Progress indicator (visible while scanning)
+			create "TextLabel" {
+				LayoutOrder = 2,
+				AutomaticSize = Enum.AutomaticSize.X,
+				Size = UDim2.new(0, 0, 1, 0),
+				BackgroundTransparency = 1,
+				Text = function()
+					local total = scanTotal()
+					if total == 0 then
+						return "Scanning..."
+					end
+					return `{scanProgress()} / {total}`
+				end,
+				TextColor3 = function()
+					return theme.colors().foregroundMuted
+				end,
+				TextSize = theme.fontSize.small,
+				FontFace = theme.font,
+				Visible = isScanning,
+			},
+
+			-- Scan / Stop / Clear button
+			create "Frame" {
+				LayoutOrder = 3,
+				Size = UDim2.fromOffset(60, 32),
+				BackgroundTransparency = 1,
+
+				Button({
+					text = function()
+						if isScanning() then
+							return "Stop"
+						elseif hasScanned() then
+							return "Clear"
+						end
+						return "Scan"
+					end,
+					onClick = function()
+						if isScanning() then
+							stopFieldScan()
+						elseif hasScanned() then
+							clearFieldScan()
+						else
+							startFieldScan()
+						end
+					end,
+					variant = function()
+						return if isScanning() then "secondary" else "primary"
+					end :: any,
+					size = "small",
+					disabled = function()
+						return not isScanning() and not hasScanned() and trackPath() == ""
+					end,
+					fullWidth = true,
+				}),
+			},
+		},
+
+		-- Version list / scan results
+		create "ScrollingFrame" {
+			LayoutOrder = 4,
+			Size = UDim2.new(1, 0, 1, -218),
 			BackgroundTransparency = 1,
 			ScrollBarThickness = 8,
 			ScrollBarImageColor3 = function()
@@ -988,60 +1504,218 @@ local function VersionsView(): Frame
 				SortOrder = Enum.SortOrder.LayoutOrder,
 			},
 
+			-- Version list group (hidden while field history scan is active)
 			create "Frame" {
-				Size = UDim2.new(1, 0, 0, 60),
-				BackgroundTransparency = 1,
-				Visible = Store.versionListLoading,
-
-				create "TextLabel" {
-					Size = UDim2.fromScale(1, 1),
-					BackgroundTransparency = 1,
-					Text = "Loading versions...",
-					TextColor3 = function()
-						return theme.colors().foregroundMuted
-					end,
-					TextSize = theme.fontSize.normal,
-					FontFace = theme.font,
-				},
-			},
-
-			-- Versions
-			indexes(Store.versionList, function(versionInfo, index)
-				return VersionRow(versionInfo, index)
-			end),
-
-			-- Empty state
-			create "Frame" {
-				Size = UDim2.new(1, 0, 0, 100),
+				LayoutOrder = 1,
+				Size = UDim2.new(1, 0, 0, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
 				BackgroundTransparency = 1,
 				Visible = function()
-					return #Store.versionList() == 0 and not Store.versionListLoading()
+					return not (isScanning() or hasScanned())
 				end,
 
 				create "UIListLayout" {
 					SortOrder = Enum.SortOrder.LayoutOrder,
-					HorizontalAlignment = Enum.HorizontalAlignment.Center,
-					VerticalAlignment = Enum.VerticalAlignment.Center,
-					Padding = UDim.new(0, 8),
 				},
 
-				create "TextLabel" {
-					LayoutOrder = 1,
-					AutomaticSize = Enum.AutomaticSize.XY,
+				create "Frame" {
+					Size = UDim2.new(1, 0, 0, 60),
 					BackgroundTransparency = 1,
-					Text = "No versions found",
-					TextColor3 = function()
-						return theme.colors().foregroundMuted
-					end,
-					TextSize = theme.fontSize.normal,
-					FontFace = theme.font,
+					Visible = Store.versionListLoading,
+
+					create "TextLabel" {
+						Size = UDim2.fromScale(1, 1),
+						BackgroundTransparency = 1,
+						Text = "Loading versions...",
+						TextColor3 = function()
+							return theme.colors().foregroundMuted
+						end,
+						TextSize = theme.fontSize.normal,
+						FontFace = theme.font,
+					},
 				},
 
-				Button({
-					text = "Refresh",
-					onClick = loadVersions,
-					variant = "secondary",
-				}),
+				-- Versions
+				indexes(Store.versionList, function(versionInfo, index)
+					return VersionRow(versionInfo, index)
+				end),
+
+				-- Empty state
+				create "Frame" {
+					Size = UDim2.new(1, 0, 0, 100),
+					BackgroundTransparency = 1,
+					Visible = function()
+						return #Store.versionList() == 0 and not Store.versionListLoading()
+					end,
+
+					create "UIListLayout" {
+						SortOrder = Enum.SortOrder.LayoutOrder,
+						HorizontalAlignment = Enum.HorizontalAlignment.Center,
+						VerticalAlignment = Enum.VerticalAlignment.Center,
+						Padding = UDim.new(0, 8),
+					},
+
+					create "TextLabel" {
+						LayoutOrder = 1,
+						AutomaticSize = Enum.AutomaticSize.XY,
+						BackgroundTransparency = 1,
+						Text = "No versions found",
+						TextColor3 = function()
+							return theme.colors().foregroundMuted
+						end,
+						TextSize = theme.fontSize.normal,
+						FontFace = theme.font,
+					},
+
+					Button({
+						text = "Refresh",
+						onClick = loadVersions,
+						variant = "secondary",
+					}),
+				},
+			},
+
+			-- Scan results group (shown while scanning or after scan)
+			create "Frame" {
+				LayoutOrder = 2,
+				Size = UDim2.new(1, 0, 0, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				BackgroundTransparency = 1,
+				Visible = function()
+					return isScanning() or hasScanned()
+				end,
+
+				create "UIListLayout" {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+				},
+
+				-- Result rows
+				indexes(scanResults, function(result, index)
+					return ScanResultRow(result, index)
+				end),
+
+				-- Scanning in progress row (appears below results as they build up)
+				create "Frame" {
+					LayoutOrder = 10001,
+					Size = UDim2.new(1, 0, 0, 48),
+					BackgroundTransparency = 1,
+					Visible = isScanning,
+
+					create "TextLabel" {
+						Size = UDim2.fromScale(1, 1),
+						BackgroundTransparency = 1,
+						Text = function()
+							local total = scanTotal()
+							local progress = scanProgress()
+							if total == 0 then
+								return "Scanning versions..."
+							end
+							return `Scanning {progress} / {total} versions...`
+						end,
+						TextColor3 = function()
+							return theme.colors().foregroundMuted
+						end,
+						TextSize = theme.fontSize.small,
+						TextXAlignment = Enum.TextXAlignment.Center,
+						FontFace = theme.font,
+					},
+				},
+
+				-- No results state (after scan finishes with no matches)
+				create "Frame" {
+					LayoutOrder = 10002,
+					Size = UDim2.new(1, 0, 0, 80),
+					BackgroundTransparency = 1,
+					Visible = function()
+						return hasScanned() and not isScanning() and #scanResults() == 0
+					end,
+
+					create "TextLabel" {
+						Size = UDim2.fromScale(1, 1),
+						BackgroundTransparency = 1,
+						Text = function()
+							return `No changes found for "{trackPath()}"`
+						end,
+						TextColor3 = function()
+							return theme.colors().foregroundMuted
+						end,
+						TextSize = theme.fontSize.normal,
+						TextXAlignment = Enum.TextXAlignment.Center,
+						FontFace = theme.font,
+					},
+				},
+
+				-- Summary footer (version count + scan-more option)
+				create "Frame" {
+					LayoutOrder = 10003,
+					Size = UDim2.new(1, 0, 0, 40),
+					BackgroundTransparency = 1,
+					Visible = function()
+						return hasScanned() and not isScanning()
+					end,
+
+					create "UIPadding" {
+						PaddingLeft = UDim.new(0, 16),
+						PaddingRight = UDim.new(0, 12),
+					},
+
+					create "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						VerticalAlignment = Enum.VerticalAlignment.Center,
+						Padding = UDim.new(0, 12),
+					},
+
+					create "TextLabel" {
+						LayoutOrder = 1,
+						Size = UDim2.new(0, 0, 1, 0),
+						AutomaticSize = Enum.AutomaticSize.X,
+						BackgroundTransparency = 1,
+						Text = function()
+							local count = scanVersionCount()
+							local found = #scanResults()
+							local plural = if count == 1 then "version" else "versions"
+							return `Scanned {count} {plural} • {found} {if found == 1 then "change" else "changes"} found`
+						end,
+						TextColor3 = function()
+							return theme.colors().foregroundMuted
+						end,
+						TextSize = theme.fontSize.small,
+						TextXAlignment = Enum.TextXAlignment.Left,
+						FontFace = theme.font,
+					},
+
+					create "Frame" {
+						LayoutOrder = 2,
+						Size = UDim2.fromOffset(110, 28),
+						BackgroundTransparency = 1,
+						Visible = Store.hasMoreVersions,
+
+						Button({
+							text = "Scan more",
+							onClick = extendScan,
+							variant = "ghost",
+							size = "small",
+							fullWidth = true,
+						}),
+					},
+
+					create "TextLabel" {
+						LayoutOrder = 3,
+						AutomaticSize = Enum.AutomaticSize.X,
+						Size = UDim2.new(0, 0, 1, 0),
+						BackgroundTransparency = 1,
+						Text = "All versions scanned",
+						TextColor3 = function()
+							return theme.colors().foregroundMuted
+						end,
+						TextSize = theme.fontSize.small,
+						TextXAlignment = Enum.TextXAlignment.Left,
+						FontFace = theme.font,
+						Visible = function()
+							return not Store.hasMoreVersions()
+						end,
+					},
+				},
 			},
 		},
 	}

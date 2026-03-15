@@ -7,6 +7,7 @@
 local Vide = require(script.Parent.Parent.Packages.Vide)
 local Types = require(script.Parent.Types)
 local Functional = require(script.Parent.Parent.utils.Functional)
+local PatternMatcher = require(script.Parent.Parent.utils.PatternMatcher)
 
 local source = Vide.source
 local derive = Vide.derive
@@ -91,9 +92,11 @@ Store.redoStack = source({} :: { UndoAction })
 
 -- Search state
 Store.searchQuery = source("")
-Store.searchMode = source("all" :: "all" | "content" | "keys" | "values" | "type" | "regex")
+Store.searchMode = source("all" :: "all" | "content" | "keys" | "values" | "type")
+Store.useRegex = source(false)
 Store.searchResults = source({} :: { { string | number } }) -- Array of paths that match
 Store.currentSearchIndex = source(0)
+Store.searchError = source("" :: string) -- Non-empty when regex is enabled with an invalid pattern
 
 -- Version browsing state
 Store.versionList = source({} :: { Types.VersionInfo })
@@ -210,6 +213,9 @@ function Store.setCurrentKey(key: string?, data: KeyData?, rawSize: number?)
 	Store.searchResults({})
 	Store.currentSearchIndex(0)
 	Store.rawDataSize(rawSize)
+	Store.versionList({})
+	Store.hasMoreVersions(false)
+	Store.versionListLoading(false)
 end
 
 function Store.setDiffView(state: DiffViewState?)
@@ -389,11 +395,21 @@ function Store.discardChanges()
 end
 
 -- Search functions
-export type SearchMode = "all" | "content" | "keys" | "values" | "type" | "regex" | "size"
+export type SearchMode = "all" | "content" | "keys" | "values" | "type" | "size"
 
 function Store.setSearchMode(mode: SearchMode)
 	Store.searchMode(mode)
 	-- Re-run search with new mode (deferred to avoid reactive scope conflicts)
+	local query = Store.searchQuery()
+	if query ~= "" then
+		task.defer(function()
+			Store.performSearch(query)
+		end)
+	end
+end
+
+function Store.setUseRegex(enabled: boolean)
+	Store.useRegex(enabled)
 	local query = Store.searchQuery()
 	if query ~= "" then
 		task.defer(function()
@@ -428,22 +444,77 @@ function Store.performSearch(query: string)
 	local mode = Store.searchMode()
 	local lowerQuery = string.lower(query)
 
-	-- For regex mode, compile the pattern
-	local regexPattern: string? = nil
-	if mode == "regex" then
-		local success, _ = pcall(function()
-			string.find("test", query)
-		end)
-		if success then
-			regexPattern = query
+	-- Regex toggle: compile pattern when enabled
+	local useRegex = Store.useRegex()
+	local compiled: PatternMatcher.CompiledPattern? = nil
+	if useRegex then
+		local c = PatternMatcher.compile(query)
+		if not c.valid then
+			Store.searchError(c.error or "Invalid pattern")
+			Store.searchResults({})
+			Store.currentSearchIndex(0)
+			return
+		end
+		Store.searchError(c.warning or "")
+		compiled = c
+	else
+		Store.searchError("")
+	end
+
+	-- ── Pre-compute mode flags (avoid string comparisons in hot loop) ──
+	local M_ALL     = mode == "all"
+	local M_KEYS    = mode == "keys"
+	local M_VALUES  = mode == "values"
+	local M_CONTENT = mode == "content"
+	local M_TYPE    = mode == "type"
+	local M_SIZE    = mode == "size"
+	local M_REGEX   = useRegex and compiled ~= nil
+
+	-- ── Cache stdlib functions as upvalues ──
+	local sfind = string.find
+	local slower = string.lower
+	local stostring = tostring
+	local ttype = type
+	local pmTest = PatternMatcher.test
+
+	-- ── Mutable path stack: push/pop instead of copy-per-node ──
+	local pathStack: { string | number } = {}
+	local depth = 0
+
+	-- Snapshot current path (only called on match — the rare path)
+	local function addMatch()
+		results[#results + 1] = table.move(pathStack, 1, depth, 1, table.create(depth))
+	end
+
+	-- ── Size mode helpers ──
+	local sizeOp: string? = nil
+	local sizeVal1: number? = nil
+	local sizeVal2: number? = nil
+	if M_SIZE then
+		local trimmed = query:gsub("%s+", "")
+		local rMin, rMax = trimmed:match("^(%d+)%-(%d+)$")
+		if not rMin then rMin, rMax = trimmed:match("^(%d+)%.%.(%d+)$") end
+		if rMin and rMax then
+			sizeOp = "range"
+			sizeVal1 = tonumber(rMin)
+			sizeVal2 = tonumber(rMax)
+		else
+			local op, num = trimmed:match("^([><=!]+)(%d+)$")
+			if op and num then
+				sizeOp = op
+				sizeVal1 = tonumber(num)
+			else
+				local exact = tonumber(trimmed)
+				if exact then
+					sizeOp = "="
+					sizeVal1 = exact
+				end
+			end
 		end
 	end
 
-	-- Size matching helpers
 	local function countDescendants(value: any): number
-		if type(value) ~= "table" then
-			return 0
-		end
+		if ttype(value) ~= "table" then return 0 end
 		local count = 0
 		for _, v in value :: any do
 			count += 1
@@ -452,226 +523,100 @@ function Store.performSearch(query: string)
 		return count
 	end
 
-	-- Parse size query: >100, <50, >=100, <=50, 10-100, 50
-	local sizeOperator: string? = nil
-	local sizeValue1: number? = nil
-	local sizeValue2: number? = nil -- For range queries
-	if mode == "size" then
-		local trimmedQuery = query:gsub("%s+", "") -- Remove whitespace
-		
-		-- Check for range (e.g., "10-100" or "10..100")
-		local rangeMin, rangeMax = trimmedQuery:match("^(%d+)%-(%d+)$")
-		if not rangeMin then
-			rangeMin, rangeMax = trimmedQuery:match("^(%d+)%.%.(%d+)$")
-		end
-		
-		if rangeMin and rangeMax then
-			sizeOperator = "range"
-			sizeValue1 = tonumber(rangeMin)
-			sizeValue2 = tonumber(rangeMax)
-		else
-			-- Check for comparison operators
-			local op, num = trimmedQuery:match("^([><=!]+)(%d+)$")
-			if op and num then
-				sizeOperator = op
-				sizeValue1 = tonumber(num)
-			else
-				-- Just a number means exact match
-				local exactNum = tonumber(trimmedQuery)
-				if exactNum then
-					sizeOperator = "="
-					sizeValue1 = exactNum
-				end
-			end
-		end
-	end
-
 	local function matchesSize(value: any): boolean
-		if type(value) ~= "table" then
-			return false -- Size only applies to tables
-		end
-		if not sizeOperator or not sizeValue1 then
-			return false
-		end
-		
+		if ttype(value) ~= "table" or not sizeOp or not sizeVal1 then return false end
 		local count = countDescendants(value)
-		
-		if sizeOperator == "range" and sizeValue2 then
-			return count >= sizeValue1 and count <= sizeValue2
-		elseif sizeOperator == ">" then
-			return count > sizeValue1
-		elseif sizeOperator == ">=" then
-			return count >= sizeValue1
-		elseif sizeOperator == "<" then
-			return count < sizeValue1
-		elseif sizeOperator == "<=" then
-			return count <= sizeValue1
-		elseif sizeOperator == "=" or sizeOperator == "==" then
-			return count == sizeValue1
-		elseif sizeOperator == "!=" or sizeOperator == "~=" then
-			return count ~= sizeValue1
+		if sizeOp == "range" then return sizeVal2 ~= nil and count >= sizeVal1 and count <= sizeVal2
+		elseif sizeOp == ">" then return count > sizeVal1
+		elseif sizeOp == ">=" then return count >= sizeVal1
+		elseif sizeOp == "<" then return count < sizeVal1
+		elseif sizeOp == "<=" then return count <= sizeVal1
+		elseif sizeOp == "=" or sizeOp == "==" then return count == sizeVal1
+		elseif sizeOp == "!=" or sizeOp == "~=" then return count ~= sizeVal1
 		end
-		
 		return false
 	end
 
-	-- Type matching helper
+	-- ── Type matching helper ──
 	local function matchesType(value: any): boolean
-		local typeStr = string.lower(typeof(value))
-		local valueType = type(value)
-
-		-- Handle specific type queries
-		if lowerQuery == "string" then
-			return valueType == "string"
-		elseif lowerQuery == "number" or lowerQuery == "int" or lowerQuery == "integer" then
-			return valueType == "number"
-		elseif lowerQuery == "boolean" or lowerQuery == "bool" then
-			return valueType == "boolean"
+		local valueType = ttype(value)
+		if lowerQuery == "string" then return valueType == "string"
+		elseif lowerQuery == "number" or lowerQuery == "int" or lowerQuery == "integer" then return valueType == "number"
+		elseif lowerQuery == "boolean" or lowerQuery == "bool" then return valueType == "boolean"
 		elseif lowerQuery == "table" or lowerQuery == "object" then
-			return valueType == "table" and not Functional.isEmpty(value) and type(next(value :: any)) ~= "number"
+			return valueType == "table" and not Functional.isEmpty(value) and ttype(next(value :: any)) ~= "number"
 		elseif lowerQuery == "array" or lowerQuery == "list" then
-			return valueType == "table" and (Functional.isEmpty(value) or type(next(value :: any)) == "number")
-		elseif lowerQuery == "null" or lowerQuery == "nil" then
-			return value == nil
-		elseif lowerQuery == "buffer" then
-			return typeof(value) == "buffer"
+			return valueType == "table" and (Functional.isEmpty(value) or ttype(next(value :: any)) == "number")
+		elseif lowerQuery == "null" or lowerQuery == "nil" then return value == nil
+		elseif lowerQuery == "buffer" then return typeof(value) == "buffer"
 		end
-
-		return string.find(typeStr, lowerQuery, 1, true) ~= nil
+		return sfind(slower(typeof(value)), lowerQuery, 1, true) ~= nil
 	end
 
-	-- Content matching - exact substring match in serialized form
-	local function matchesContent(value: any): boolean
-		if type(value) == "table" then
-			-- For content mode, serialize the table and search
-			local success, json = pcall(function()
-				return game:GetService("HttpService"):JSONEncode(value)
-			end)
-			if success then
-				return string.find(string.lower(json), lowerQuery, 1, true) ~= nil
-			end
-			return false
-		else
-			local valueStr = tostring(value)
-			return string.find(string.lower(valueStr), lowerQuery, 1, true) ~= nil
-		end
-	end
+	-- ── Main traversal ──
+	local function searchNode(node: any)
+		if ttype(node) ~= "table" then return end
 
-	-- Key matching
-	local function matchesKey(key: string | number): boolean
-		local keyStr = string.lower(tostring(key))
-		if mode == "regex" and regexPattern then
-			return string.find(keyStr, regexPattern) ~= nil
-		end
-		return string.find(keyStr, lowerQuery, 1, true) ~= nil
-	end
+		for k, v in node do
+			depth += 1
+			pathStack[depth] = k
 
-	-- Value matching (leaf values only)
-	local function matchesValue(value: any): boolean
-		if type(value) == "table" then
-			return false -- Only match leaf values in "values" mode
-		end
-		local valueStr = string.lower(tostring(value))
-		if mode == "regex" and regexPattern then
-			return string.find(valueStr, regexPattern) ~= nil
-		end
-		return string.find(valueStr, lowerQuery, 1, true) ~= nil
-	end
+			local hit = false
+			local vIsTable = ttype(v) == "table"
 
-	local function searchNode(value: any, path: { string | number })
-		if type(value) == "table" then
-			-- For content mode, check if the entire table matches
-			if mode == "content" then
-				if matchesContent(value) then
-					-- Check if this specific node matches, not just children
-					local tableJson = game:GetService("HttpService"):JSONEncode(value)
-					if string.find(string.lower(tableJson), lowerQuery, 1, true) then
-						-- Add if it's a direct match at this level
-						local directMatch = false
-						for k, v in value do
-							if type(v) ~= "table" then
-								if string.find(string.lower(tostring(v)), lowerQuery, 1, true) then
-									directMatch = true
-									break
-								end
-							end
-							if string.find(string.lower(tostring(k)), lowerQuery, 1, true) then
-								directMatch = true
-								break
-							end
-						end
-						if directMatch and #path > 0 then
-							table.insert(results, Functional.deepClone(path))
-						end
+			if M_ALL then
+				local keyLower = slower(stostring(k))
+				if M_REGEX then
+					hit = pmTest(compiled :: any, keyLower)
+					if not hit and not vIsTable then
+						hit = pmTest(compiled :: any, slower(stostring(v)))
 					end
-				end
-			end
-
-			for k, v in value do
-				local newPath = Functional.deepClone(path)
-				table.insert(newPath, k)
-
-				local shouldAdd = false
-
-				if mode == "all" then
-					-- Match both keys and values
-					if matchesKey(k) or (type(v) ~= "table" and matchesValue(v)) then
-						shouldAdd = true
-					end
-				elseif mode == "keys" then
-					if matchesKey(k) then
-						shouldAdd = true
-					end
-				elseif mode == "values" then
-					if type(v) ~= "table" and matchesValue(v) then
-						shouldAdd = true
-					end
-				elseif mode == "type" then
-					if matchesType(v) then
-						shouldAdd = true
-					end
-				elseif mode == "content" then
-					-- For content, match values directly
-					if type(v) ~= "table" and matchesContent(v) then
-						shouldAdd = true
-					end
-				elseif mode == "regex" and regexPattern then
-					local keyStr = tostring(k)
-					local valueStr = if type(v) ~= "table" then tostring(v) else ""
-					if string.find(keyStr, regexPattern) or string.find(valueStr, regexPattern) then
-						shouldAdd = true
-					end
-				elseif mode == "size" then
-					if matchesSize(v) then
-						shouldAdd = true
+				else
+					hit = sfind(keyLower, lowerQuery, 1, true) ~= nil
+					if not hit and not vIsTable then
+						hit = sfind(slower(stostring(v)), lowerQuery, 1, true) ~= nil
 					end
 				end
 
-				if shouldAdd then
-					-- Check not already added
-					local alreadyAdded = Functional.some(results, function(r)
-						if #r ~= #newPath then
-							return false
-						end
-						for i, p in r do
-							if p ~= newPath[i] then
-								return false
-							end
-						end
-						return true
-					end)
-					if not alreadyAdded then
-						table.insert(results, newPath)
-					end
+			elseif M_KEYS then
+				local keyLower = slower(stostring(k))
+				hit = if M_REGEX
+					then pmTest(compiled :: any, keyLower)
+					else sfind(keyLower, lowerQuery, 1, true) ~= nil
+
+			elseif M_VALUES then
+				if not vIsTable then
+					local valLower = slower(stostring(v))
+					hit = if M_REGEX
+						then pmTest(compiled :: any, valLower)
+						else sfind(valLower, lowerQuery, 1, true) ~= nil
 				end
 
-				-- Recurse into children
-				searchNode(v, newPath)
+			elseif M_CONTENT then
+				if not vIsTable then
+					local valLower = slower(stostring(v))
+					hit = if M_REGEX
+						then pmTest(compiled :: any, valLower)
+						else sfind(valLower, lowerQuery, 1, true) ~= nil
+				end
+
+			elseif M_TYPE then
+				hit = matchesType(v)
+
+			elseif M_SIZE then
+				hit = matchesSize(v)
 			end
+
+			if hit then
+				addMatch()
+			end
+
+			searchNode(v)
+			depth -= 1
 		end
 	end
 
-	searchNode(data, {})
+	searchNode(data)
 	Store.searchResults(results)
 	Store.currentSearchIndex(if #results > 0 then 1 else 0)
 end

@@ -6,6 +6,7 @@
 
 local Vide = require(script.Parent.Parent.Parent.Packages.Vide)
 local Theme = require(script.Parent.Parent.Theme)
+local Tooltip = require(script.Parent.Tooltip)
 
 local create = Vide.create
 local source = Vide.source
@@ -13,19 +14,22 @@ local derive = Vide.derive
 local action = Vide.action
 local spring = Vide.spring
 
-export type SearchMode = "all" | "content" | "keys" | "values" | "type" | "regex" | "size"
+export type SearchMode = "all" | "content" | "keys" | "values" | "type" | "size"
 
 export type SearchBarProps = {
 	value: () -> string,
 	onChange: (value: string) -> (),
 	mode: () -> SearchMode,
 	onModeChange: (mode: SearchMode) -> (),
+	useRegex: () -> boolean,
+	onRegexToggle: () -> (),
 	placeholder: string?,
 	resultCount: () -> number,
 	currentResult: () -> number,
 	onNextResult: () -> (),
 	onPrevResult: () -> (),
 	onClear: () -> (),
+	patternError: (() -> string?)?,
 }
 
 local SEARCH_MODES: { { id: SearchMode, label: string, description: string } } = {
@@ -34,7 +38,6 @@ local SEARCH_MODES: { { id: SearchMode, label: string, description: string } } =
 	{ id = "keys", label = "Keys", description = "Search only keys" },
 	{ id = "values", label = "Values", description = "Search only values" },
 	{ id = "type", label = "Type", description = "Search by type (string, number, boolean, array, object, null, buffer)" },
-	{ id = "regex", label = "Regex", description = "Search using Lua patterns" },
 	{ id = "size", label = "Size", description = "Filter by descendant count (>100, <50, 10-100)" },
 }
 
@@ -66,6 +69,12 @@ local function SearchBar(props: SearchBarProps): Frame
 	end)
 
 	local resultText = derive(function()
+		if props.patternError then
+			local err = props.patternError()
+			if err and err ~= "" then
+				return "Pattern: " .. err
+			end
+		end
 		local count = props.resultCount()
 		local current = props.currentResult()
 		if count == 0 and hasValue() then
@@ -88,10 +97,17 @@ local function SearchBar(props: SearchBarProps): Frame
 
 	local placeholderText = derive(function()
 		local mode = props.mode()
+		local regex = props.useRegex()
+		if regex then
+			if mode == "keys" then
+				return "Lua pattern on keys (e.g., ^prefix)"
+			elseif mode == "values" then
+				return "Lua pattern on values (e.g., %d+)"
+			end
+			return "Lua pattern (e.g., %d+, ^prefix)"
+		end
 		if mode == "type" then
 			return "Type: string, number, boolean, array, object, null..."
-		elseif mode == "regex" then
-			return "Lua pattern (e.g., %d+, ^prefix)"
 		elseif mode == "content" then
 			return "Search content directly..."
 		elseif mode == "keys" then
@@ -189,7 +205,8 @@ local function SearchBar(props: SearchBarProps): Frame
 
 			-- Background frame for hover/selected states
 			create "Frame" {
-				Size = UDim2.fromScale(1, 1),
+				Size = UDim2.new(1, 0, 1, -2),
+				Position = UDim2.new(0, 0, 0, 1),
 				BackgroundColor3 = backgroundColor,
 				BackgroundTransparency = function()
 					-- Selected items have subtle transparent background
@@ -350,9 +367,60 @@ local function SearchBar(props: SearchBarProps): Frame
 					},
 				},
 
+				-- Regex toggle button
+				(function()
+					local regexHovered = source(false)
+					local targetRegexBg = derive(function()
+						local c = theme.colors()
+						if props.useRegex() then
+							return c.accent
+						elseif regexHovered() then
+							return c.backgroundTertiary
+						end
+						return c.backgroundSecondary
+					end)
+					local regexBg = spring(targetRegexBg, 0.15)
+
+					local btn = create "TextButton" {
+						LayoutOrder = 2,
+						Size = UDim2.fromOffset(26, 26),
+						BackgroundColor3 = regexBg,
+						BorderSizePixel = 0,
+						Text = ".*",
+						TextColor3 = function()
+							local c = theme.colors()
+							if props.useRegex() then
+								return Color3.new(1, 1, 1)
+							end
+							return c.foregroundMuted
+						end,
+						TextSize = theme.fontSize.small,
+						FontFace = theme.fontMedium,
+						AutoButtonColor = false,
+
+						Activated = function()
+							props.onRegexToggle()
+						end,
+
+						MouseEnter = function()
+							regexHovered(true)
+						end,
+
+						MouseLeave = function()
+							regexHovered(false)
+						end,
+
+						create "UICorner" {
+							CornerRadius = UDim.new(0, theme.radius.sm),
+						},
+					}
+					Tooltip.addTooltip(btn, "Use Lua patterns", "bottom")
+					return btn
+				end)(),
+
 				-- Mode selector button
 				create "TextButton" {
-					LayoutOrder = 2,
+					LayoutOrder = 3,
 					Size = UDim2.fromOffset(76, 26),
 					BackgroundColor3 = function()
 						local c = theme.colors()
