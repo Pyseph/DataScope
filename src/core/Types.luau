@@ -147,7 +147,7 @@ export type UndoAction = {
 	newKey: (string | number)?,
 }
 
-export type DiffFieldKind = "added" | "removed"
+export type DiffFieldKind = "added" | "removed" | "changed"
 
 export type DiffViewState = {
 	versionA: string,

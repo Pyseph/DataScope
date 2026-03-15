@@ -203,6 +203,17 @@ local function VersionsView(): Frame
 				if type(branchValue) == "table" then
 					addNestedPaths(pathFilter, entry.path, branchValue)
 				end
+			elseif entry.kind == "changed" or entry.kind == "type_changed" then
+				focusedCount += 1
+				local entryPathKey = pathToKey(entry.path)
+				pathKinds[entryPathKey] = "changed"
+				pathFilter[entryPathKey] = true
+
+				-- Show nested contents of the new (after) value if it's a container
+				local branchValue = entry.after
+				if type(branchValue) == "table" then
+					addNestedPaths(pathFilter, entry.path, branchValue)
+				end
 			end
 		end
 
@@ -234,7 +245,7 @@ local function VersionsView(): Frame
 		local entries = Diff.compute(preparedA.value, preparedB.value)
 		local diffData, pathKinds, pathFilter, focusedCount = buildDiffProjection(preparedB, entries)
 		if focusedCount == 0 then
-			Store.showToast("info", "No added/removed fields between the selected versions")
+			Store.showToast("info", "No differences found between the selected versions")
 			compareLoading(false)
 			return
 		end
@@ -251,7 +262,7 @@ local function VersionsView(): Frame
 			pathFilter = pathFilter,
 		})
 		Store.setView("editKey")
-		Store.showToast("info", `Opened diff view with {focusedCount} added/removed fields`)
+		Store.showToast("info", `Opened diff view with {focusedCount} changed field{if focusedCount == 1 then "" else "s"}`)
 		compareLoading(false)
 	end
 

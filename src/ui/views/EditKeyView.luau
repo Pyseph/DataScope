@@ -305,14 +305,42 @@ local function EditKeyView(): Frame
 		end
 	end)
 
+	-- Auto-expand ancestor paths of diff nodes when entering diff mode so
+	-- changes at any depth are immediately visible without manual expansion.
+	effect(function()
+		local diffView = Store.diffView()
+		if not diffView then
+			return
+		end
+
+		local newPaths: { [string]: boolean } = {}
+		for pathKey in diffView.pathKinds do
+			local searchFrom = 1
+			while true do
+				local dotPos = string.find(pathKey, ".", searchFrom, true)
+				if not dotPos then
+					break
+				end
+				newPaths[string.sub(pathKey, 1, dotPos - 1)] = true
+				searchFrom = dotPos + 1
+			end
+		end
+
+		if next(newPaths) then
+			task.defer(function()
+				expandedPaths(newPaths)
+			end)
+		end
+	end)
+
 	-- Format key metadata
 	local keyMetadata = derive(function(): string
 		local diffView = Store.diffView()
 		if diffView then
 			if isCompact() then
-				return "Diff mode • Added/Removed only"
+				return "Diff mode"
 			end
-			return `Diff mode • A {string.sub(diffView.versionA, 1, 10)}... -> B {string.sub(diffView.versionB, 1, 10)}... • Added/Removed only`
+			return `Diff mode • A {string.sub(diffView.versionA, 1, 10)}... -> B {string.sub(diffView.versionB, 1, 10)}...`
 		end
 
 		local keyData = Store.currentKeyData()

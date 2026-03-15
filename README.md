@@ -41,6 +41,11 @@
   - ProfileService data format
   - **Custom hooks** - Register your own compression/serialization hooks
 
+- **🔀 Improved Diff View** - Version comparison now shows all changes, not just added/removed fields:
+  - **Value changes** (`~`) are now highlighted in yellow alongside additions (`+`) and removals (`-`)
+  - Type changes between versions are also captured
+  - Diff view auto-expands ancestor nodes on open so every change is immediately visible without manual expansion
+
 ### Architecture
 - **Vide** - Reactive UI library for clean, declarative components
 - **Functional Programming** - Pure functions, immutable state, composition

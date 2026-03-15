@@ -464,6 +464,8 @@ local function TreeView(props: TreeViewProps): Frame
 				return tintColor(baseBackgroundColor(), c.success, 0.2)
 			elseif highlightKind == "removed" then
 				return tintColor(baseBackgroundColor(), c.error, 0.2)
+			elseif highlightKind == "changed" then
+				return tintColor(baseBackgroundColor(), c.warning, 0.2)
 			end
 
 			if isCurrentResult() then
@@ -487,6 +489,8 @@ local function TreeView(props: TreeViewProps): Frame
 				return c.success
 			elseif highlightKind == "removed" then
 				return c.error
+			elseif highlightKind == "changed" then
+				return c.warning
 			end
 			
 			-- Dim empty objects/arrays
@@ -759,6 +763,8 @@ local function TreeView(props: TreeViewProps): Frame
 							return c.success
 						elseif highlightKind == "removed" then
 							return c.error
+						elseif highlightKind == "changed" then
+							return c.warning
 						end
 						if isCurrentResult() then
 							return c.foreground
@@ -909,6 +915,8 @@ local function TreeView(props: TreeViewProps): Frame
 						return c.success
 					elseif kind == "removed" then
 						return c.error
+					elseif kind == "changed" then
+						return c.warning
 					end
 					return c.backgroundTertiary
 				end,
@@ -919,6 +927,8 @@ local function TreeView(props: TreeViewProps): Frame
 						return "+"
 					elseif kind == "removed" then
 						return "-"
+					elseif kind == "changed" then
+						return "~"
 					end
 					return ""
 				end,
@@ -929,6 +939,8 @@ local function TreeView(props: TreeViewProps): Frame
 						return c.success
 					elseif kind == "removed" then
 						return c.error
+					elseif kind == "changed" then
+						return c.warning
 					end
 					return c.foregroundMuted
 				end,
@@ -950,6 +962,8 @@ local function TreeView(props: TreeViewProps): Frame
 							return c.success
 						elseif kind == "removed" then
 							return c.error
+						elseif kind == "changed" then
+							return c.warning
 						end
 						return c.border
 					end,
