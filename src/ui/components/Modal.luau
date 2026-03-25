@@ -51,6 +51,11 @@ local function Modal(props: ModalProps): Frame
 		return isOpen() or transparency() < 0.99
 	end)
 
+	local isCloseHovered = source(false)
+	local closeHover = spring(function()
+		return if isCloseHovered() then 1 else 0
+	end, 0.25)
+
 	return create "Frame" {
 		Size = UDim2.fromScale(1, 1),
 		Position = UDim2.fromScale(0, 0),
@@ -59,7 +64,7 @@ local function Modal(props: ModalProps): Frame
 		Visible = visible,
 		ZIndex = 1000,
 
-		InputBegan = function(_rbx: Frame, input: InputObject)
+		InputBegan = function(input: InputObject)
 			if closeOnBackdrop and input.UserInputType == Enum.UserInputType.MouseButton1 then
 				props.onClose()
 			end
@@ -78,7 +83,7 @@ local function Modal(props: ModalProps): Frame
 			BorderSizePixel = 0,
 			ZIndex = 1001,
 
-			InputBegan = function(_rbx: Frame, input: InputObject)
+			InputBegan = function(input: InputObject)
 				-- Prevent click through
 				if input.UserInputType == Enum.UserInputType.MouseButton1 then
 					-- Do nothing, stop propagation
@@ -114,7 +119,7 @@ local function Modal(props: ModalProps): Frame
 				if props.title
 					then create "Frame" {
 						LayoutOrder = 1,
-						Size = UDim2.new(1, 0, 0, 56),
+						Size = UDim2.new(1, 0, 0, 44),
 						BackgroundColor3 = function()
 							return theme.colors().backgroundSecondary
 						end,
@@ -160,14 +165,29 @@ local function Modal(props: ModalProps): Frame
 							AnchorPoint = Vector2.new(1, 0.5),
 							Position = UDim2.new(1, 0, 0.5, 0),
 							Size = UDim2.fromOffset(28, 28),
-							BackgroundTransparency = 1,
+							BackgroundColor3 = function()
+								return theme.colors().foreground
+							end,
+							BackgroundTransparency = function()
+								return 1 - closeHover() * 0.1
+							end,
 							Image = theme.icons.close,
 							ImageColor3 = function()
-								return theme.colors().foregroundMuted
+								return theme.colors().foregroundMuted:Lerp(theme.colors().foreground, closeHover())
 							end,
 							ImageTransparency = contentTransparency,
 
+							MouseEnter = function()
+								isCloseHovered(true)
+							end,
+							MouseLeave = function()
+								isCloseHovered(false)
+							end,
 							Activated = props.onClose,
+
+							create "UICorner" {
+								CornerRadius = UDim.new(0, theme.radius.sm),
+							},
 						},
 					}
 					else nil,

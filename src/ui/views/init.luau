@@ -10,4 +10,5 @@ return {
 	EditKeyView = require(script.EditKeyView),
 	VersionsView = require(script.VersionsView),
 	SettingsView = require(script.SettingsView),
+	QueryView = require(script.QueryView),
 }

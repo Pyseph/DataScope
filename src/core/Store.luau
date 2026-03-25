@@ -8,6 +8,9 @@ local Vide = require(script.Parent.Parent.Packages.Vide)
 local Types = require(script.Parent.Types)
 local Functional = require(script.Parent.Parent.utils.Functional)
 local PatternMatcher = require(script.Parent.Parent.utils.PatternMatcher)
+local QueryEngine = require(script.Parent.QueryEngine)
+local Operations = require(script.Parent.Parent.datastore.Operations)
+local KeyViewLoader = require(script.Parent.Parent.datastore.KeyViewLoader)
 
 local source = Vide.source
 local derive = Vide.derive
@@ -45,7 +48,8 @@ local Store = {}
 Store.plugin = nil :: Plugin?
 
 -- Core reactive state
-Store.currentView = source("connect") -- "connect" | "browse" | "editKey" | "versions" | "settings" | "ordered"
+Store.currentView = source("connect") -- "connect" | "browse" | "editKey" | "versions" | "settings" | "ordered" | "query"
+Store.previousView = source("browse") -- tracks where we came from for back navigation
 Store.currentTab = source("connect") -- "connect" | "list" | "history"
 
 -- Connection state
@@ -106,8 +110,22 @@ Store.hasMoreVersions = source(false)
 -- Diff view state (used by EditKeyView when comparing two versions)
 Store.diffView = source(nil :: DiffViewState?)
 
+-- Query view state
+Store.queryExpression = source("")
+Store.queryKeyListText = source("")
+Store.queryResults = source({} :: { Types.QueryResult })
+Store.querySelectedIndex = source(0)
+Store.queryIsRunning = source(false)
+Store.queryCancelled = source(false)
+Store.queryProgress = source(0)
+Store.queryTotal = source(0)
+Store.queryError = source(nil :: string?)
+Store.queryVersionMode = source(false)
+Store.queryVersionSeconds = source(3600)
+
 -- History state
 Store.history = source({} :: { HistoryRecord })
+Store.onHistoryChanged = nil :: (() -> ())?
 
 -- Settings state
 Store.settings = source(Functional.deepClone(defaultSettings))
@@ -125,6 +143,7 @@ Store.canUndo = nil :: any
 Store.canRedo = nil :: any
 Store.searchResultCount = nil :: any
 Store.currentSearchResult = nil :: any
+Store.querySelectedResult = nil :: any
 
 -- Initialize derived state in a stable scope
 root(function()
@@ -156,10 +175,20 @@ root(function()
 		end
 		return nil
 	end)
+
+	Store.querySelectedResult = derive(function()
+		local results = Store.queryResults()
+		local idx = Store.querySelectedIndex()
+		if idx > 0 and idx <= #results then
+			return results[idx]
+		end
+		return nil
+	end)
 end)
 
 -- Actions
 function Store.setView(view: string)
+	Store.previousView(Store.currentView())
 	Store.currentView(view)
 end
 
@@ -194,6 +223,17 @@ function Store.disconnect()
 	Store.searchQuery("")
 	Store.searchResults({})
 	Store.currentSearchIndex(0)
+	Store.queryExpression("")
+	Store.queryKeyListText("")
+	Store.queryResults({})
+	Store.querySelectedIndex(0)
+	Store.queryIsRunning(false)
+	Store.queryCancelled(true)
+	Store.queryProgress(0)
+	Store.queryTotal(0)
+	Store.queryError(nil)
+	Store.queryVersionMode(false)
+	Store.currentTab("connect")
 	Store.setView("connect")
 end
 
@@ -650,6 +690,12 @@ function Store.nextSearchResult()
 end
 
 -- History functions
+local function notifyHistoryChanged()
+	if Store.onHistoryChanged then
+		Store.onHistoryChanged()
+	end
+end
+
 function Store.addHistoryRecord(connectionInfo: ConnectionInfo)
 	local historyVal = Store.history()
 	local newHistory = Functional.filter(historyVal, function(record)
@@ -684,6 +730,7 @@ function Store.addHistoryRecord(connectionInfo: ConnectionInfo)
 	end
 
 	Store.history(newHistory)
+	notifyHistoryChanged()
 end
 
 function Store.toggleHistoryPin(index: number)
@@ -704,6 +751,7 @@ function Store.toggleHistoryPin(index: number)
 	end)
 
 	Store.history(newHistory)
+	notifyHistoryChanged()
 end
 
 function Store.removeHistoryRecord(index: number)
@@ -715,6 +763,7 @@ function Store.removeHistoryRecord(index: number)
 	local newHistory = Functional.deepClone(historyVal)
 	table.remove(newHistory, index)
 	Store.history(newHistory)
+	notifyHistoryChanged()
 end
 
 function Store.clearHistory()
@@ -724,6 +773,7 @@ function Store.clearHistory()
 		return r.pinned
 	end)
 	Store.history(pinned)
+	notifyHistoryChanged()
 end
 
 -- Settings functions
@@ -757,11 +807,6 @@ function Store.showToast(toastType: Types.ToastType, message: string, duration: 
 	table.insert(newToasts, toast)
 	Store.toasts(newToasts)
 
-	-- Auto-remove after duration
-	task.delay(toast.duration :: number, function()
-		Store.dismissToast(id)
-	end)
-
 	return id
 end
 
@@ -780,6 +825,199 @@ end
 
 function Store.closeModal()
 	Store.modalContent(nil)
+end
+
+-- Query functions
+function Store.startQuery()
+	local expression = Store.queryExpression()
+	local keyListText = Store.queryKeyListText()
+	local connection = Store.connection()
+
+	if not connection then
+		Store.queryError("Not connected to a DataStore")
+		return
+	end
+
+	-- Parse expression
+	local parseResult = QueryEngine.parse(expression)
+	if not parseResult.success or not parseResult.ast then
+		Store.queryError(parseResult.error or "Invalid expression")
+		return
+	end
+
+	local ast = parseResult.ast
+
+	-- Parse key list (split by newlines and commas, trim whitespace)
+	local keys: { string } = {}
+	for line in string.gmatch(keyListText, "[^\n]+") do
+		for key in string.gmatch(line, "[^,]+") do
+			local trimmed = string.match(key, "^%s*(.-)%s*$")
+			if trimmed and trimmed ~= "" then
+				table.insert(keys, trimmed)
+			end
+		end
+	end
+
+	if #keys == 0 then
+		Store.queryError("No keys provided")
+		return
+	end
+
+	-- Get DataStore
+	local dsResult = Operations.getDataStore(connection)
+	if not dsResult.success then
+		Store.queryError(`Failed to get DataStore: {dsResult.error}`)
+		return
+	end
+	local datastore = dsResult.value :: DataStore
+
+	-- Reset state
+	Store.queryResults({})
+	Store.querySelectedIndex(0)
+	Store.queryProgress(0)
+	Store.queryTotal(#keys)
+	Store.queryError(nil)
+	Store.queryIsRunning(true)
+	Store.queryCancelled(false)
+
+	local versionMode = Store.queryVersionMode()
+	local versionSeconds = Store.queryVersionSeconds()
+
+	task.spawn(function()
+		for i, keyName in keys do
+			-- Check cancellation
+			if Store.queryCancelled() then
+				break
+			end
+
+			-- Check budget with retry
+			local budgetRetries = 0
+			while not Operations.hasBudget(Enum.DataStoreRequestType.GetAsync) do
+				if budgetRetries >= 10 then
+					break
+				end
+				budgetRetries += 1
+				task.wait(1 * budgetRetries)
+			end
+
+			-- Fetch key data
+			local keyResult = Operations.getKey(datastore, keyName)
+			if not keyResult.success then
+				-- Add error result
+				local results = Functional.deepClone(Store.queryResults())
+				table.insert(results, {
+					keyName = keyName,
+					keyData = nil,
+					matched = false,
+					matchedPaths = nil,
+					summary = "",
+					error = keyResult.error or "Failed to fetch",
+				} :: Types.QueryResult)
+				Store.queryResults(results)
+				Store.queryProgress(i)
+				task.wait()
+				continue
+			end
+
+			-- Decompress data via hook system before querying
+			local rawKeyData = keyResult.value :: Types.KeyData
+			local hookContext = {
+				datastoreName = connection.name,
+				key = keyName,
+				scope = connection.scope,
+			}
+			local prepared = KeyViewLoader.prepare(rawKeyData, hookContext, false)
+			local keyData = prepared.keyData
+
+			-- Fetch versions if version mode is on
+			local versions: { QueryEngine.VersionEntry }? = nil
+			if versionMode then
+				local now = os.time()
+				local cutoff = now - versionSeconds
+				local versionListResult = Operations.listVersions(datastore, keyName, Enum.SortDirection.Descending, cutoff * 1000)
+				if versionListResult.success then
+					local versionList = versionListResult.value :: { versions: { Types.VersionInfo }, hasMore: boolean }
+					versions = {}
+					for _, vInfo in versionList.versions do
+						if Store.queryCancelled() then
+							break
+						end
+						-- Wait for budget
+						local vBudgetRetries = 0
+						while not Operations.hasBudget(Enum.DataStoreRequestType.GetAsync) do
+							if vBudgetRetries >= 5 then
+								break
+							end
+							vBudgetRetries += 1
+							task.wait(1)
+						end
+						local vResult = Operations.getKeyVersion(datastore, keyName, vInfo.version)
+						if vResult.success then
+							local vPrepared = KeyViewLoader.prepare(vResult.value :: Types.KeyData, hookContext, false)
+							table.insert(versions :: any, {
+								version = vInfo,
+								data = vPrepared.keyData,
+							})
+						end
+					end
+				end
+			end
+
+			-- Evaluate expression
+			local context: QueryEngine.EvalContext = {
+				data = keyData.value,
+				metadata = keyData.metadata,
+				keyName = keyName,
+				versions = versions,
+			}
+
+			local evalResult = QueryEngine.evaluate(ast, context)
+
+			-- Build summary
+			local summary = ""
+			if evalResult.success then
+				if evalResult.value then
+					summary = "Matched"
+				else
+					summary = "No match"
+				end
+			else
+				summary = evalResult.error or "Evaluation error"
+			end
+
+			-- Add result
+			local results = Functional.deepClone(Store.queryResults())
+			table.insert(results, {
+				keyName = keyName,
+				keyData = keyData,
+				matched = evalResult.success and (if evalResult.value then true else false),
+				matchedPaths = evalResult.matchedPaths,
+				summary = summary,
+				error = if not evalResult.success then evalResult.error else nil,
+			} :: Types.QueryResult)
+			Store.queryResults(results)
+			Store.queryProgress(i)
+			task.wait()
+		end
+
+		Store.queryIsRunning(false)
+	end)
+end
+
+function Store.cancelQuery()
+	Store.queryCancelled(true)
+end
+
+function Store.clearQuery()
+	Store.queryResults({})
+	Store.querySelectedIndex(0)
+	Store.queryProgress(0)
+	Store.queryTotal(0)
+	Store.queryError(nil)
+end
+
+function Store.selectQueryResult(index: number)
+	Store.querySelectedIndex(index)
 end
 
 -- Utility to get default settings

@@ -17,9 +17,11 @@ local BrowseView = require(script.Parent.views.BrowseView)
 local EditKeyView = require(script.Parent.views.EditKeyView)
 local VersionsView = require(script.Parent.views.VersionsView)
 local SettingsView = require(script.Parent.views.SettingsView)
+local QueryView = require(script.Parent.views.QueryView)
 
 local create = Vide.create
 local switch = Vide.switch
+local show = Vide.show
 
 export type AppProps = {
 	parent: Instance,
@@ -50,6 +52,7 @@ local function App(props: AppProps): Frame
 				editKey = EditKeyView,
 				versions = VersionsView,
 				settings = SettingsView,
+				query = QueryView,
 			},
 		},
 
@@ -59,16 +62,19 @@ local function App(props: AppProps): Frame
 			onDismiss = Store.dismissToast,
 		}),
 
-		-- Modal overlay
-		create "Frame" {
-			Name = "ModalContainer",
-			Size = UDim2.fromScale(1, 1),
-			BackgroundTransparency = 1,
-			Visible = Store.isModalOpen,
-			ZIndex = 1000,
-
-			-- Modal content rendered here when open
-		},
+		-- Modal overlay (rendered via show so content is created/destroyed with modal)
+		show(Store.isModalOpen, function()
+			local contentFn = Store.modalContent()
+			local children = if contentFn then { contentFn() } else {}
+			return Modal({
+				isOpen = function()
+					return true
+				end,
+				onClose = Store.closeModal,
+				size = "large",
+				children = children,
+			})
+		end),
 		
 		-- Tooltip display (global, rendered on top)
 		Tooltip.Display(),

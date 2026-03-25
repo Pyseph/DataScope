@@ -16,6 +16,8 @@ local spring = Vide.spring
 
 export type SearchMode = "all" | "content" | "keys" | "values" | "type" | "size"
 
+export type SearchBarFocusRef = { focus: (() -> ())? }
+
 export type SearchBarProps = {
 	value: () -> string,
 	onChange: (value: string) -> (),
@@ -30,6 +32,8 @@ export type SearchBarProps = {
 	onPrevResult: () -> (),
 	onClear: () -> (),
 	patternError: (() -> string?)?,
+	dropdownPortal: ((frame: Frame) -> ())?,
+	focusRef: SearchBarFocusRef?,
 }
 
 local SEARCH_MODES: { { id: SearchMode, label: string, description: string } } = {
@@ -46,6 +50,8 @@ local function SearchBar(props: SearchBarProps): Frame
 	local isFocused = source(false)
 	local isHovered = source(false)
 	local isModeDropdownOpen = source(false)
+	local modeButtonAbsPos = source(Vector2.zero)
+	local modeButtonAbsSize = source(Vector2.zero)
 
 	local targetBorderColor = derive(function()
 		local c = theme.colors()
@@ -291,7 +297,7 @@ local function SearchBar(props: SearchBarProps): Frame
 		}
 	end
 
-	return create "Frame" {
+	local searchBarFrame = create "Frame" {
 		Name = "SearchBar",
 		Size = UDim2.new(1, 0, 0, 36),
 		BackgroundTransparency = 1,
@@ -421,7 +427,8 @@ local function SearchBar(props: SearchBarProps): Frame
 				-- Mode selector button
 				create "TextButton" {
 					LayoutOrder = 3,
-					Size = UDim2.fromOffset(76, 26),
+					Size = UDim2.fromOffset(0, 26),
+					AutomaticSize = Enum.AutomaticSize.X,
 					BackgroundColor3 = function()
 						local c = theme.colors()
 						if isModeDropdownOpen() then
@@ -437,12 +444,29 @@ local function SearchBar(props: SearchBarProps): Frame
 						isModeDropdownOpen(not isModeDropdownOpen())
 					end,
 
+					action(function(btn: TextButton)
+						modeButtonAbsPos(btn.AbsolutePosition)
+						modeButtonAbsSize(btn.AbsoluteSize)
+						btn:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
+							modeButtonAbsPos(btn.AbsolutePosition)
+						end)
+						btn:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+							modeButtonAbsSize(btn.AbsoluteSize)
+						end)
+					end),
+
 					create "UICorner" {
 						CornerRadius = UDim.new(0, theme.radius.sm),
 					},
 
+					create "UIPadding" {
+						PaddingLeft = UDim.new(0, 8),
+						PaddingRight = UDim.new(0, 8),
+					},
+
 					create "Frame" {
 						Size = UDim2.fromScale(1, 1),
+						AutomaticSize = Enum.AutomaticSize.X,
 						BackgroundTransparency = 1,
 
 						create "UIListLayout" {
@@ -520,6 +544,11 @@ local function SearchBar(props: SearchBarProps): Frame
 
 						action(function(instance)
 							textBoxRef = instance
+							if props.focusRef then
+								props.focusRef.focus = function()
+									instance:CaptureFocus()
+								end
+							end
 						end),
 
 						FocusLost = function()
@@ -602,9 +631,77 @@ local function SearchBar(props: SearchBarProps): Frame
 			},
 		},
 
-		-- Mode dropdown
-		create "Frame" {
-			Position = UDim2.new(0, 34, 0, 42),
+		-- Mode dropdown (inline fallback when no portal is provided)
+		(function(): Frame?
+			if props.dropdownPortal then
+				return nil
+			end
+			return create "Frame" {
+				Position = UDim2.new(0, 34, 0, 42),
+				Size = UDim2.fromOffset(220, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				BackgroundColor3 = function()
+					return theme.colors().backgroundSecondary
+				end,
+				BorderSizePixel = 0,
+				Visible = isModeDropdownOpen,
+				ZIndex = 100,
+				ClipsDescendants = true,
+				Active = true,
+
+				create "UICorner" {
+					CornerRadius = UDim.new(0, theme.radius.md),
+				},
+
+				create "UIStroke" {
+					Color = function()
+						return theme.colors().border
+					end,
+					Thickness = 1,
+				},
+
+				create "UIPadding" {
+					PaddingTop = UDim.new(0, 4),
+					PaddingBottom = UDim.new(0, 4),
+				},
+
+				create "Frame" {
+					Size = UDim2.new(1, 0, 0, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					BackgroundTransparency = 1,
+					ZIndex = 100,
+
+					create "UIListLayout" {
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+
+					unpack((function()
+						local items = {}
+						for i, modeInfo in SEARCH_MODES do
+							local item = ModeItem(modeInfo)
+							item.LayoutOrder = i
+							item.ZIndex = 100
+							table.insert(items, item)
+						end
+						return items
+					end)()),
+				},
+			}
+		end)(),
+	}
+
+	-- Portal dropdown: render at top level for proper z-ordering
+	if props.dropdownPortal then
+		local portalAbsPos = source(Vector2.zero)
+
+		local dropdown = create "Frame" {
+			Name = "SearchModeDropdown",
+			Position = function()
+				local pos = modeButtonAbsPos()
+				local size = modeButtonAbsSize()
+				local parentPos = portalAbsPos()
+				return UDim2.fromOffset(pos.X - parentPos.X, pos.Y - parentPos.Y + size.Y + 4)
+			end,
 			Size = UDim2.fromOffset(220, 0),
 			AutomaticSize = Enum.AutomaticSize.Y,
 			BackgroundColor3 = function()
@@ -653,8 +750,23 @@ local function SearchBar(props: SearchBarProps): Frame
 					return items
 				end)()),
 			},
-		},
-	}
+		}
+
+		props.dropdownPortal(dropdown)
+
+		-- Track portal parent position once parented
+		task.defer(function()
+			local parent = dropdown.Parent
+			if parent and parent:IsA("GuiObject") then
+				portalAbsPos(parent.AbsolutePosition)
+				parent:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
+					portalAbsPos(parent.AbsolutePosition)
+				end)
+			end
+		end)
+	end
+
+	return searchBarFrame
 end
 
 return SearchBar

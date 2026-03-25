@@ -14,55 +14,61 @@ local HISTORY_KEY = "DataScope_History"
 
 local Settings = {}
 
+-- Helper to decode a saved value that may be a JSON string or a raw table
+local function decodeSaved(saved: any): { [string]: any }?
+	if type(saved) == "table" then
+		return saved
+	end
+	if type(saved) == "string" then
+		local success, parsed = pcall(function()
+			return HttpService:JSONDecode(saved)
+		end)
+		if success and type(parsed) == "table" then
+			return parsed
+		end
+	end
+	return nil
+end
+
 -- Load settings from plugin storage
 function Settings.load(plugin: Plugin)
 	-- Load settings
-	local savedSettings = plugin:GetSetting(SETTINGS_KEY)
+	local rawSettings = plugin:GetSetting(SETTINGS_KEY)
+	local savedSettings = decodeSaved(rawSettings)
 	if savedSettings then
-		local success, parsed = pcall(function()
-			return HttpService:JSONDecode(savedSettings)
-		end)
-
-		if success and type(parsed) == "table" then
-			local defaults = Store.getDefaultSettings()
-			local merged = Functional.merge(defaults, parsed)
-			Store.settings(merged)
-		end
+		local defaults = Store.getDefaultSettings()
+		local merged = Functional.merge(defaults, savedSettings)
+		Store.settings(merged)
 	end
 
 	-- Load history
-	local savedHistory = plugin:GetSetting(HISTORY_KEY)
+	local rawHistory = plugin:GetSetting(HISTORY_KEY)
+	local savedHistory = decodeSaved(rawHistory)
 	if savedHistory then
-		local success, parsed = pcall(function()
-			return HttpService:JSONDecode(savedHistory)
-		end)
-
-		if success and type(parsed) == "table" then
-			Store.history(parsed)
-		end
+		Store.history(savedHistory :: any)
 	end
 end
 
--- Save settings to plugin storage
+-- Save all settings to plugin storage
 function Settings.save(plugin: Plugin)
-	-- Save settings
 	local settings = Store.settings()
-	local success, json = pcall(function()
-		return HttpService:JSONEncode(settings)
+	pcall(function()
+		plugin:SetSetting(SETTINGS_KEY, HttpService:JSONEncode(settings))
 	end)
 
-	if success then
-		plugin:SetSetting(SETTINGS_KEY, json)
-	end
+	Settings.saveHistory(plugin)
+end
 
-	-- Save history
+-- Save only history to plugin storage
+function Settings.saveHistory(plugin: Plugin)
 	local history = Store.history()
-	local historySuccess, historyJson = pcall(function()
-		return HttpService:JSONEncode(history)
+	local success, result = pcall(function()
+		local json = HttpService:JSONEncode(history)
+		plugin:SetSetting(HISTORY_KEY, json)
 	end)
 
-	if historySuccess then
-		plugin:SetSetting(HISTORY_KEY, historyJson)
+	if not success then
+		warn("[DataScope] Failed to save history:", result)
 	end
 end
 

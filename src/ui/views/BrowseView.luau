@@ -546,9 +546,26 @@ local function BrowseView(): Frame
 					}),
 				},
 
-				-- Settings button
+				-- Query button
 				create "Frame" {
 					LayoutOrder = 4,
+					Size = UDim2.fromOffset(36, 36),
+					BackgroundTransparency = 1,
+
+					Button({
+						text = "",
+						onClick = function()
+							Store.setView("query")
+						end,
+						variant = "ghost",
+						icon = theme.icons.search,
+						tooltip = "Cross-key Query",
+					}),
+				},
+
+				-- Settings button
+				create "Frame" {
+					LayoutOrder = 5,
 					Size = UDim2.fromOffset(36, 36),
 					BackgroundTransparency = 1,
 

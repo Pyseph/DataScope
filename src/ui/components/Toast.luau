@@ -28,49 +28,41 @@ local function ToastItem(toast: Toast, onDismiss: (id: string) -> (), index: num
 	local isHovered = source(false)
 	local isVisible = source(false)
 	local progress = source(1) -- Progress bar for auto-dismiss
-	
+	local hovered = false -- Plain boolean for timer (avoids Vide source issues)
+
 	-- Stagger the entry animation based on index
 	effect(function()
 		task.delay(index * 0.05, function()
 			isVisible(true)
 		end)
 	end)
-	
-	-- Auto-dismiss progress (if duration is set)
-	effect(function()
-		if toast.duration and toast.duration > 0 then
-			local startTime = os.clock()
+
+	-- Auto-dismiss with hover-pause
+	if toast.duration and toast.duration > 0 then
+		local dismissed = false
+		task.spawn(function()
+			local elapsed = 0
 			local duration = toast.duration
-			
-			local connection: RBXScriptConnection
-			connection = game:GetService("RunService").Heartbeat:Connect(function()
-				if isHovered() then
-					-- Pause progress when hovered
-					startTime = os.clock() - (1 - progress()) * duration
-					return
+			local TICK = 1 / 30
+
+			while elapsed < duration and not dismissed do
+				task.wait(TICK)
+				if not hovered then
+					elapsed += TICK
+					progress(math.max(0, 1 - elapsed / duration))
 				end
-				
-				local elapsed = os.clock() - startTime
-				local remaining = 1 - (elapsed / duration)
-				
-				if remaining <= 0 then
-					progress(0)
-					connection:Disconnect()
-					isVisible(false)
-					task.delay(0.3, function()
-						onDismiss(toast.id)
-					end)
-				else
-					progress(remaining)
-				end
-			end)
-			
-			return function()
-				connection:Disconnect()
 			end
-		end
-		return nil
-	end)
+
+			if not dismissed then
+				dismissed = true
+				progress(0)
+				isVisible(false)
+				task.delay(0.3, function()
+					onDismiss(toast.id)
+				end)
+			end
+		end)
+	end
 
 	local colors = derive(function()
 		local c = theme.colors()
@@ -151,10 +143,12 @@ local function ToastItem(toast: Toast, onDismiss: (id: string) -> (), index: num
 			ClipsDescendants = true,
 
 			MouseEnter = function()
+				hovered = true
 				isHovered(true)
 			end,
 
 			MouseLeave = function()
+				hovered = false
 				isHovered(false)
 			end,
 

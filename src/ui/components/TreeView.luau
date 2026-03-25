@@ -9,6 +9,7 @@ local Theme = require(script.Parent.Parent.Theme)
 local Types = require(script.Parent.Parent.Parent.core.Types)
 local Functional = require(script.Parent.Parent.Parent.utils.Functional)
 local VirtualizedList = require(script.Parent.VirtualizedList)
+local Tooltip = require(script.Parent.Tooltip)
 
 local create = Vide.create
 local source = Vide.source
@@ -22,6 +23,14 @@ type JSONValue = Types.JSONValue
 type TreeNode = Types.TreeNode
 type DiffFieldKind = Types.DiffFieldKind
 
+export type TreeViewExpandRef = {
+	expandPaths: ((paths: { { string | number } }) -> ())?,
+	expandAll: ((data: JSONValue) -> ())?,
+	collapseAll: (() -> ())?,
+	setExpanded: ((paths: { [string]: boolean }) -> ())?,
+	getExpanded: (() -> { [string]: boolean })?,
+}
+
 export type TreeViewProps = {
 	data: () -> JSONValue,
 	onValueChange: ((path: { string | number }, newValue: JSONValue) -> ())?,
@@ -32,9 +41,7 @@ export type TreeViewProps = {
 	searchQuery: (() -> string)?,
 	searchResults: (() -> { { string | number } })?,
 	currentSearchResult: (() -> { string | number }?)?,
-	expandedPaths: (() -> { [string]: boolean })?,
-	onToggleExpand: ((path: { string | number }) -> ())?,
-	onExpandPaths: ((paths: { { string | number } }) -> ())?,
+	expandRef: TreeViewExpandRef?,
 	useAlternatingColors: (() -> boolean)?,
 	onScrollPathChange: ((path: { string | number }) -> ())?,
 	diffPathKinds: (() -> { [string]: DiffFieldKind })?,
@@ -107,13 +114,7 @@ local function formatValue(value: JSONValue): string
 end
 
 -- Path to string key for expanded state
-local function pathToKey(path: { string | number }): string
-	local parts = {}
-	for _, p in path do
-		table.insert(parts, tostring(p))
-	end
-	return table.concat(parts, ".")
-end
+local pathToKey = Functional.pathToKey
 
 local function isPathInFilter(pathKey: string, filter: { [string]: boolean }): boolean
 	if filter[pathKey] then
@@ -205,26 +206,76 @@ local function TreeView(props: TreeViewProps): Frame
 
 	-- Context Menu State (position stored as local X,Y relative to TreeView root)
 	local contextMenu = source({ visible = false, x = 0, y = 0, node = nil } :: { visible: boolean, x: number, y: number, node: TreeNode? })
-	
 	local closeContextMenu = function()
 		contextMenu({ visible = false, x = 0, y = 0, node = nil })
 	end
-	
+
+	local openContextMenu = function(x: number, y: number, node: TreeNode)
+		Tooltip.hide()
+		-- Close first so show() unmounts, then defer reopen so it remounts with fresh state
+		closeContextMenu()
+		task.defer(function()
+			contextMenu({ visible = true, x = x, y = y, node = node })
+		end)
+	end
+
+
 	-- Track TreeView root frame position for coordinate conversion
 	local treeViewAbsPos = source(Vector2.zero)
 
-	-- Local state for expanded paths if not provided
+	-- TreeView always owns its expand state internally
 	local localExpandedPaths = source({} :: { [string]: boolean })
-	local expandedPaths: () -> { [string]: boolean } = props.expandedPaths or function()
+	local expandedPaths: () -> { [string]: boolean } = function()
 		return localExpandedPaths()
 	end
 
-	local toggleExpand: ({ string | number }) -> () = props.onToggleExpand or function(path: { string | number })
+	local toggleExpand: ({ string | number }) -> () = function(path: { string | number })
 		local key = pathToKey(path)
 		local current = localExpandedPaths()
 		local newPaths = Functional.deepClone(current)
 		newPaths[key] = not newPaths[key]
 		localExpandedPaths(newPaths)
+	end
+
+	-- Register imperative methods on expandRef so consumers can control expand state
+	if props.expandRef then
+		props.expandRef.expandPaths = function(paths: { { string | number } })
+			local current = localExpandedPaths()
+			local newPaths = Functional.deepClone(current)
+			for _, path in paths do
+				newPaths[pathToKey(path)] = true
+			end
+			localExpandedPaths(newPaths)
+		end
+		props.expandRef.expandAll = function(data: JSONValue)
+			if type(data) ~= "table" then
+				return
+			end
+			local paths: { [string]: boolean } = {}
+			local function addPaths(value: any, pathStr: string)
+				if type(value) ~= "table" then
+					return
+				end
+				if pathStr ~= "" then
+					paths[pathStr] = true
+				end
+				for k, v in value do
+					local childPath = if pathStr == "" then tostring(k) else pathStr .. "." .. tostring(k)
+					addPaths(v, childPath)
+				end
+			end
+			addPaths(data, "")
+			localExpandedPaths(paths)
+		end
+		props.expandRef.collapseAll = function()
+			localExpandedPaths({})
+		end
+		props.expandRef.setExpanded = function(paths: { [string]: boolean })
+			localExpandedPaths(paths)
+		end
+		props.expandRef.getExpanded = function()
+			return localExpandedPaths()
+		end
 	end
 
 	local readOnly: () -> boolean = props.readOnly or function()
@@ -568,12 +619,7 @@ local function TreeView(props: TreeViewProps): Frame
 				local n = node()
 				if n then
 					local absPos = treeViewAbsPos()
-					contextMenu({
-						visible = true,
-						x = input.Position.X - absPos.X,
-						y = input.Position.Y - absPos.Y,
-						node = n
-					})
+					openContextMenu(input.Position.X - absPos.X, input.Position.Y - absPos.Y, n)
 				end
 			end
 		end
@@ -622,6 +668,9 @@ local function TreeView(props: TreeViewProps): Frame
 			-- Double-click detection and Context Menu
 			InputBegan = function(input: InputObject)
 				if input.UserInputType == Enum.UserInputType.MouseButton1 then
+					if contextMenu().visible then
+						closeContextMenu()
+					end
 					handleDoubleClick()
 				else
 					handleRightClick(input)
@@ -1050,88 +1099,16 @@ local function TreeView(props: TreeViewProps): Frame
 		
 		-- Update expanded paths if needed
 		if needsUpdate then
-			if props.onExpandPaths then
-				-- Use batch expand for external state (doesn't toggle, just ensures expanded)
-				local pathsToExpand = {}
-				for i = 1, #currentResult do
-					local ancestorPath = {}
-					for j = 1, i do
-						table.insert(ancestorPath, currentResult[j])
-					end
-					local pathKey = pathToKey(ancestorPath)
-					if newExpanded[pathKey] and not currentExpanded[pathKey] then
-						-- Clone the path before inserting, otherwise all entries would reference the same table
-						table.insert(pathsToExpand, table.clone(ancestorPath))
-					end
-				end
-				
-				-- Expand all paths in a single deferred callback
-				if #pathsToExpand > 0 then
-					task.defer(function()
-						props.onExpandPaths(pathsToExpand)
-					end)
-				end
-			elseif props.onToggleExpand then
-				-- Fallback to toggle for backwards compatibility
-				local pathsToExpand = {}
-				for i = 1, #currentResult do
-					local ancestorPath = {}
-					for j = 1, i do
-						table.insert(ancestorPath, currentResult[j])
-					end
-					local pathKey = pathToKey(ancestorPath)
-					if newExpanded[pathKey] and not currentExpanded[pathKey] then
-						table.insert(pathsToExpand, table.clone(ancestorPath))
-					end
-				end
-				
-				if #pathsToExpand > 0 then
-					task.defer(function()
-						for _, path in pathsToExpand do
-							toggleExpand(path)
-						end
-					end)
-				end
-			else
-				-- Using local state
-				localExpandedPaths(newExpanded)
-			end
-			
-			-- Wait a frame for the tree to rebuild before scrolling
-			task.defer(function()
-				if not scrollingFrameRef then
-					return
-				end
-				
-				-- Find the index of the current result in flattened nodes
-				local nodes = flattenedNodes()
-				local targetIndex = nil
-				for i, node in nodes do
-					if pathMatches(node.path, currentResult) then
-						targetIndex = i
-						break
-					end
-				end
-				
-				if targetIndex then
-					-- Calculate the Y position of the target row (28 pixels per row)
-					local rowHeight = 28
-					local targetY = (targetIndex - 1) * rowHeight
-					
-					-- Scroll to show the target row in the middle of the viewport
-					local viewportHeight = scrollingFrameRef.AbsoluteWindowSize.Y
-					local scrollY = math.max(0, targetY - viewportHeight / 2)
-					
-					scrollingFrameRef.CanvasPosition = Vector2.new(0, scrollY)
-				end
-			end)
-		else
-			-- No expansion needed, scroll immediately
+			localExpandedPaths(newExpanded)
+		end
+
+		-- Scroll to reveal the current search result.
+		-- Defer if paths were expanded (wait for tree rebuild), otherwise scroll immediately.
+		local function scrollToResult()
 			if not scrollingFrameRef then
 				return
 			end
-			
-			-- Find the index of the current result in flattened nodes
+
 			local nodes = flattenedNodes()
 			local targetIndex = nil
 			for i, node in nodes do
@@ -1140,18 +1117,20 @@ local function TreeView(props: TreeViewProps): Frame
 					break
 				end
 			end
-			
+
 			if targetIndex then
-				-- Calculate the Y position of the target row (28 pixels per row)
 				local rowHeight = 28
 				local targetY = (targetIndex - 1) * rowHeight
-				
-				-- Scroll to show the target row in the middle of the viewport
 				local viewportHeight = scrollingFrameRef.AbsoluteWindowSize.Y
 				local scrollY = math.max(0, targetY - viewportHeight / 2)
-				
 				scrollingFrameRef.CanvasPosition = Vector2.new(0, scrollY)
 			end
+		end
+
+		if needsUpdate then
+			task.defer(scrollToResult)
+		else
+			scrollToResult()
 		end
 	end)
 
@@ -1183,11 +1162,38 @@ local function TreeView(props: TreeViewProps): Frame
 		end,
 	})
 	
+	-- Build a synthetic root node representing the top-level data container
+	local function makeRootNode(): TreeNode?
+		local data = props.data()
+		if type(data) ~= "table" then
+			return nil
+		end
+		local isArray = true
+		local count = 0
+		for k, _ in data :: any do
+			count += 1
+			if type(k) ~= "number" then
+				isArray = false
+			end
+		end
+		return {
+			key = "$root",
+			value = data,
+			path = {},
+			depth = 0,
+			isExpanded = true,
+			isObject = not isArray,
+			isArray = isArray,
+			childCount = count,
+			matchesSearch = false,
+		}
+	end
+
 	return create "Frame" {
 		Size = UDim2.fromScale(1, 1),
 		BackgroundTransparency = 1,
 		ClipsDescendants = true,
-		
+
 		-- Track absolute position for coordinate conversion
 		action(function(frame: Frame)
 			treeViewAbsPos(frame.AbsolutePosition)
@@ -1195,44 +1201,38 @@ local function TreeView(props: TreeViewProps): Frame
 				treeViewAbsPos(frame.AbsolutePosition)
 			end)
 		end),
-		
-		-- Click anywhere to close context menu (or right-click to re-open on new row)
-		create "TextButton" {
-			Size = UDim2.fromScale(1, 1),
-			BackgroundTransparency = 1,
-			Text = "",
-			Visible = function() return contextMenu().visible end,
-			ZIndex = 100,
-			
-			-- Use InputBegan to handle both left-click (close) and right-click (re-open)
-			InputBegan = function(input: InputObject)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 then
-					closeContextMenu()
-				elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
-					-- Right-click: find which row is under cursor and re-open menu there
-					local absPos = treeViewAbsPos()
-					local localX = input.Position.X - absPos.X
-					local localY = input.Position.Y - absPos.Y
-					
-					if scrollingFrameRef then
-						local scrollY = scrollingFrameRef.CanvasPosition.Y
-						local rowIndex = math.floor((localY + scrollY) / 28) + 1
-						local nodes = flattenedNodes()
-						local targetNode = nodes[rowIndex]
-						if targetNode then
-							contextMenu({
-								visible = true,
-								x = localX,
-								y = localY,
-								node = targetNode,
-							})
-							return
-						end
-					end
+
+		-- Click handling for empty space
+		InputBegan = function(input: InputObject)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				if contextMenu().visible then
 					closeContextMenu()
 				end
-			end,
-		},
+				return
+			end
+			if input.UserInputType == Enum.UserInputType.MouseButton2 then
+				local absPos = treeViewAbsPos()
+				local localX = input.Position.X - absPos.X
+				local localY = input.Position.Y - absPos.Y
+
+				-- Check if click is on a row
+				if scrollingFrameRef then
+					local scrollY = scrollingFrameRef.CanvasPosition.Y
+					local rowIndex = math.floor((localY + scrollY) / 28) + 1
+					local nodes = flattenedNodes()
+					if nodes[rowIndex] then
+						return -- Row handler will take care of it
+					end
+				end
+
+				-- Empty space: open root context menu
+				local rootNode = makeRootNode()
+				if rootNode then
+					openContextMenu(localX, localY, rootNode)
+				end
+			end
+		end,
+
 		
 		list,
 		
@@ -1241,21 +1241,115 @@ local function TreeView(props: TreeViewProps): Frame
 			local state = contextMenu()
 			local n = state.node
 			if not n then return nil end
-			
+
+			local isContainer = n.isObject or n.isArray
+			local canInsert = isContainer and not readOnly() and props.onInsert ~= nil
+
 			-- Hover sources for menu items (avoids MouseEnter/MouseLeave self param issue)
 			local copyHovered = source(false)
 			local expandHovered = source(false)
+			local insertHovered = source(false)
+			local insertKeyText = source("")
+			local isInsertMode = source(false)
+			local insertError = source("")
 			local deleteHovered = source(false)
-			
+
+			-- Generate a unique key name for objects
+			local function getNextKeyName(): string
+				if n.isArray then
+					return tostring(n.childCount + 1)
+				end
+				-- Object: find a unique "newKey" name
+				local base = "newKey"
+				local val = n.value :: any
+				if val[base] == nil then
+					return base
+				end
+				local i = 1
+				while val[base .. "_" .. tostring(i)] ~= nil do
+					i += 1
+				end
+				return base .. "_" .. tostring(i)
+			end
+
+			-- Handle insert submission
+			local function submitInsert()
+				if not props.onInsert then return end
+
+				if n.isArray then
+					-- Arrays: auto-append at next index
+					props.onInsert(n.path, n.childCount + 1, "")
+					-- Expand parent to show new entry
+					local pathKey = pathToKey(n.path)
+					local expanded = expandedPaths()
+					if not expanded[pathKey] then
+						toggleExpand(n.path)
+					end
+					closeContextMenu()
+					return
+				end
+
+				-- Object: validate key name
+				local keyName = insertKeyText()
+				if keyName == "" then
+					insertError("Key name cannot be empty")
+					return
+				end
+
+				-- Check for duplicate key
+				local val = n.value :: any
+				if val[keyName] ~= nil then
+					insertError("Key already exists")
+					return
+				end
+
+				props.onInsert(n.path, keyName, "")
+				-- Expand parent to show new entry
+				local pathKey = pathToKey(n.path)
+				local expanded = expandedPaths()
+				if not expanded[pathKey] then
+					toggleExpand(n.path)
+				end
+				closeContextMenu()
+			end
+
 			return create "Frame" {
 				Position = UDim2.fromOffset(state.x, state.y),
 				AutomaticSize = Enum.AutomaticSize.XY,
 				BackgroundColor3 = function() return theme.colors().backgroundSecondary end,
 				BorderSizePixel = 0,
 				ZIndex = 101,
-				
+				Active = true,
+
+				-- Right-click on the menu itself: close and reopen at new target
+				InputBegan = function(input: InputObject)
+					if input.UserInputType == Enum.UserInputType.MouseButton2 then
+						local absPos = treeViewAbsPos()
+						local localX = input.Position.X - absPos.X
+						local localY = input.Position.Y - absPos.Y
+
+						if scrollingFrameRef then
+							local scrollY = scrollingFrameRef.CanvasPosition.Y
+							local rowIndex = math.floor((localY + scrollY) / 28) + 1
+							local nodes = flattenedNodes()
+							local targetNode = nodes[rowIndex]
+							if targetNode then
+								openContextMenu(localX, localY, targetNode)
+								return
+							end
+						end
+
+						local rootNode = makeRootNode()
+						if rootNode then
+							openContextMenu(localX, localY, rootNode)
+						else
+							closeContextMenu()
+						end
+					end
+				end,
+
 				create "UICorner" { CornerRadius = UDim.new(0, 6) },
-				create "UIStroke" { 
+				create "UIStroke" {
 					Color = function() return theme.colors().border end,
 					Transparency = 0.5,
 				},
@@ -1267,11 +1361,11 @@ local function TreeView(props: TreeViewProps): Frame
 					SortOrder = Enum.SortOrder.LayoutOrder,
 					Padding = UDim.new(0, 2),
 				},
-				
+
 				-- Menu Items
 				create "TextButton" {
 					LayoutOrder = 1,
-					Size = UDim2.new(0, 140, 0, 24),
+					Size = UDim2.new(0, 180, 0, 24),
 					BackgroundColor3 = function() return theme.colors().backgroundTertiary end,
 					BackgroundTransparency = function()
 						return if copyHovered() then 0 else 1
@@ -1282,25 +1376,25 @@ local function TreeView(props: TreeViewProps): Frame
 					TextXAlignment = Enum.TextXAlignment.Left,
 					FontFace = theme.font,
 					ZIndex = 102,
-					
+
 					Activated = function()
 						print(table.concat(n.path, "."))
 						closeContextMenu()
 					end,
-					
+
 					MouseEnter = function()
 						copyHovered(true)
 					end,
 					MouseLeave = function()
 						copyHovered(false)
 					end,
-					
+
 					create "UICorner" { CornerRadius = UDim.new(0, 4) },
 				},
-				
+
 				create "TextButton" {
 					LayoutOrder = 2,
-					Size = UDim2.new(0, 140, 0, 24),
+					Size = UDim2.new(0, 180, 0, 24),
 					BackgroundColor3 = function() return theme.colors().backgroundTertiary end,
 					BackgroundTransparency = function()
 						return if expandHovered() then 0 else 1
@@ -1310,27 +1404,178 @@ local function TreeView(props: TreeViewProps): Frame
 					TextSize = theme.fontSize.small,
 					TextXAlignment = Enum.TextXAlignment.Left,
 					FontFace = theme.font,
-					Visible = n.isObject or n.isArray,
+					Visible = isContainer,
 					ZIndex = 102,
-					
+
 					Activated = function()
 						toggleExpand(n.path)
 						closeContextMenu()
 					end,
-					
+
 					MouseEnter = function()
 						expandHovered(true)
 					end,
 					MouseLeave = function()
 						expandHovered(false)
 					end,
-					
+
 					create "UICorner" { CornerRadius = UDim.new(0, 4) },
 				},
-				
+
+				-- Insert Key button
 				create "TextButton" {
 					LayoutOrder = 3,
-					Size = UDim2.new(0, 140, 0, 24),
+					Size = UDim2.new(0, 180, 0, 24),
+					BackgroundColor3 = function() return theme.colors().backgroundTertiary end,
+					BackgroundTransparency = function()
+						return if insertHovered() or isInsertMode() then 0 else 1
+					end,
+					Text = function()
+						if n.isArray then
+							return "  Insert Item"
+						end
+						return "  Insert Key"
+					end,
+					TextColor3 = function()
+						local c = theme.colors()
+						if isInsertMode() then
+							return c.accent
+						end
+						return c.foreground
+					end,
+					TextSize = theme.fontSize.small,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					FontFace = theme.font,
+					Visible = canInsert,
+					ZIndex = 102,
+
+					Activated = function()
+						if n.isArray then
+							-- Arrays: insert immediately at next index
+							submitInsert()
+						else
+							-- Objects: show key name input
+							insertKeyText(getNextKeyName())
+							insertError("")
+							isInsertMode(true)
+						end
+					end,
+
+					MouseEnter = function()
+						insertHovered(true)
+					end,
+					MouseLeave = function()
+						insertHovered(false)
+					end,
+
+					create "UICorner" { CornerRadius = UDim.new(0, 4) },
+				},
+
+				-- Inline key name input (shown for objects after clicking Insert Key)
+				show(isInsertMode, function()
+					return create "Frame" {
+						LayoutOrder = 4,
+						Size = UDim2.new(0, 180, 0, 0),
+						AutomaticSize = Enum.AutomaticSize.Y,
+						BackgroundTransparency = 1,
+						ZIndex = 102,
+
+						create "UIListLayout" {
+							SortOrder = Enum.SortOrder.LayoutOrder,
+							Padding = UDim.new(0, 2),
+						},
+
+						-- Key name input
+						create "Frame" {
+							LayoutOrder = 1,
+							Size = UDim2.new(1, 0, 0, 26),
+							BackgroundColor3 = function() return theme.colors().background end,
+							BorderSizePixel = 0,
+							ZIndex = 102,
+
+							create "UICorner" { CornerRadius = UDim.new(0, 4) },
+							create "UIStroke" {
+								Color = function()
+									local c = theme.colors()
+									if insertError() ~= "" then
+										return c.error
+									end
+									return c.accent
+								end,
+								Thickness = 1,
+							},
+							create "UIPadding" {
+								PaddingLeft = UDim.new(0, 6),
+								PaddingRight = UDim.new(0, 6),
+							},
+
+							create "TextBox" {
+								Size = UDim2.fromScale(1, 1),
+								BackgroundTransparency = 1,
+								Text = insertKeyText,
+								PlaceholderText = "Key name...",
+								TextColor3 = function() return theme.colors().foreground end,
+								PlaceholderColor3 = function() return theme.colors().foregroundMuted end,
+								TextSize = theme.fontSize.small,
+								TextXAlignment = Enum.TextXAlignment.Left,
+								FontFace = theme.fontMono,
+								ClearTextOnFocus = false,
+								ZIndex = 102,
+
+								action(function(textBox: TextBox)
+									task.defer(function()
+										textBox:CaptureFocus()
+									end)
+									textBox:GetPropertyChangedSignal("Text"):Connect(function()
+										insertKeyText(textBox.Text)
+										insertError("")
+									end)
+								end),
+
+								FocusLost = function(enterPressed: boolean)
+									if enterPressed then
+										submitInsert()
+									end
+								end,
+							},
+						},
+
+						-- Error message
+						show(function() return insertError() ~= "" end, function()
+							return create "TextLabel" {
+								LayoutOrder = 2,
+								Size = UDim2.new(1, 0, 0, 14),
+								BackgroundTransparency = 1,
+								Text = insertError,
+								TextColor3 = function() return theme.colors().error end,
+								TextSize = theme.fontSize.small - 1,
+								TextXAlignment = Enum.TextXAlignment.Left,
+								FontFace = theme.font,
+								ZIndex = 102,
+
+								create "UIPadding" {
+									PaddingLeft = UDim.new(0, 2),
+								},
+							}
+						end),
+					}
+				end),
+
+				-- Separator before delete
+				show(function() return canInsert end, function()
+					return create "Frame" {
+						LayoutOrder = 5,
+						Size = UDim2.fromOffset(176, 1),
+						BackgroundColor3 = function() return theme.colors().border end,
+						BackgroundTransparency = 0.5,
+						BorderSizePixel = 0,
+						ZIndex = 102,
+					}
+				end),
+
+				create "TextButton" {
+					LayoutOrder = 6,
+					Size = UDim2.new(0, 180, 0, 24),
 					BackgroundColor3 = function() return theme.colors().error end,
 					BackgroundTransparency = function()
 						return if deleteHovered() then 0.15 else 1
@@ -1346,21 +1591,21 @@ local function TreeView(props: TreeViewProps): Frame
 					TextXAlignment = Enum.TextXAlignment.Left,
 					FontFace = theme.font,
 					ZIndex = 102,
-					
+
 					Activated = function()
 						if props.onDelete then
 							props.onDelete(n.path)
 						end
 						closeContextMenu()
 					end,
-					
+
 					MouseEnter = function()
 						deleteHovered(true)
 					end,
 					MouseLeave = function()
 						deleteHovered(false)
 					end,
-					
+
 					create "UICorner" { CornerRadius = UDim.new(0, 4) },
 				},
 			}

@@ -47,6 +47,7 @@ local widgetInfo = DockWidgetPluginGuiInfo.new(
 local widget = plugin:CreateDockWidgetPluginGui("DataScope", widgetInfo)
 widget.Title = "DataScope"
 widget.Name = "DataScope"
+widget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
 -- Require modules
 local Vide = require(script.Parent.Packages.Vide)
@@ -68,6 +69,12 @@ local function initialize()
 
 	-- Store plugin reference for export functionality
 	Store.plugin = plugin
+
+	-- Persist history immediately whenever it changes
+	Store.onHistoryChanged = function()
+		-- Save just history (called on every history mutation)
+		Settings.saveHistory(plugin)
+	end
 
 	-- Register built-in hooks
 	BuiltInHooks.registerAll()
@@ -109,6 +116,11 @@ widget:GetPropertyChangedSignal("Enabled"):Connect(function()
 
 	if widget.Enabled then
 		initialize()
+	else
+		-- Save when widget is closed
+		if initialized then
+			Settings.save(plugin)
+		end
 	end
 end)
 
@@ -120,3 +132,4 @@ end
 
 -- Cleanup on unload
 plugin.Unloading:Connect(cleanup)
+

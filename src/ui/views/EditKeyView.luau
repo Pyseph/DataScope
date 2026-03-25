@@ -13,6 +13,8 @@ local HookManager = require(script.Parent.Parent.Parent.hooks.HookManager)
 local Functional = require(script.Parent.Parent.Parent.utils.Functional)
 local JSON = require(script.Parent.Parent.Parent.utils.JSON)
 
+local UserInputService = game:GetService("UserInputService")
+
 local Button = require(script.Parent.Parent.components.Button)
 local SearchBar = require(script.Parent.Parent.components.SearchBar)
 local TreeView = require(script.Parent.Parent.components.TreeView)
@@ -37,7 +39,7 @@ local function EditKeyView(): Frame
 
 	-- Local state
 	local viewMode = source("tree" :: "tree" | "code")
-	local expandedPaths = source({} :: { [string]: boolean })
+	local expandRef: TreeView.TreeViewExpandRef = {}
 	local codeEditorText = source("")
 	local showDeleteConfirm = source(false)
 	local scrollPath = source({} :: { string | number })
@@ -57,6 +59,9 @@ local function EditKeyView(): Frame
 	local metadataRowWeight = spring(function()
 		return if isCompact() then 0 else 1
 	end, 0.2)
+
+	-- Search bar focus ref for Ctrl+F shortcut
+	local searchFocusRef: SearchBar.SearchBarFocusRef = { focus = nil }
 
 	-- Sync code editor with data
 	local updateCodeEditor = function()
@@ -185,40 +190,20 @@ local function EditKeyView(): Frame
 		showDeleteConfirm(false)
 	end
 
-	-- Toggle expand all (optimized - no cloning, string path building)
+	-- Toggle expand all / collapse all via TreeView's expandRef
 	local expandAll = function()
 		local data = Store.editedData()
-		if type(data) ~= "table" then
-			return
+		if expandRef.expandAll then
+			task.defer(function()
+				(expandRef.expandAll :: any)(data)
+			end)
 		end
-
-		local paths: { [string]: boolean } = {}
-
-		-- Optimized: build path string directly without array cloning
-		local function addPaths(value: any, pathStr: string)
-			if type(value) ~= "table" then
-				return
-			end
-
-			if pathStr ~= "" then
-				paths[pathStr] = true
-			end
-
-			for k, v in value do
-				local childPath = if pathStr == "" then tostring(k) else pathStr .. "." .. tostring(k)
-				addPaths(v, childPath)
-			end
-		end
-
-		-- Defer the heavy work to avoid blocking UI
-		task.defer(function()
-			addPaths(data, "")
-			expandedPaths(paths)
-		end)
 	end
 
 	local collapseAll = function()
-		expandedPaths({})
+		if expandRef.collapseAll then
+			expandRef.collapseAll()
+		end
 	end
 
 	-- Export handler
@@ -326,9 +311,9 @@ local function EditKeyView(): Frame
 			end
 		end
 
-		if next(newPaths) then
+		if next(newPaths) and expandRef.setExpanded then
 			task.defer(function()
-				expandedPaths(newPaths)
+				(expandRef.setExpanded :: any)(newPaths)
 			end)
 		end
 	end)
@@ -374,6 +359,15 @@ local function EditKeyView(): Frame
 		return table.concat(parts, " • ")
 	end)
 
+	-- Overlay frame for dropdown portals (rendered above everything)
+	local rootAbsPos = source(Vector2.zero)
+	local dropdownPortalFrame = create "Frame" {
+		Name = "DropdownPortal",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		ZIndex = 50,
+	}
+
 	return create "Frame" {
 		Size = UDim2.fromScale(1, 1),
 		BackgroundColor3 = function()
@@ -383,10 +377,35 @@ local function EditKeyView(): Frame
 
 		action(function(frame: Frame)
 			viewWidth(frame.AbsoluteSize.X)
+			rootAbsPos(frame.AbsolutePosition)
 			frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 				viewWidth(frame.AbsoluteSize.X)
 			end)
+			frame:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
+				rootAbsPos(frame.AbsolutePosition)
+			end)
+
+			-- Ctrl+F shortcut to focus search bar
+			UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
+				if gameProcessed then
+					return
+				end
+				if input.KeyCode == Enum.KeyCode.F and UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+					if searchFocusRef.focus then
+						searchFocusRef.focus()
+					end
+				end
+			end)
 		end),
+
+		-- Dropdown portal overlay (above all other content, outside layout)
+		dropdownPortalFrame,
+
+		-- Content frame with layout
+		create "Frame" {
+			Name = "Content",
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
 
 		create "UIListLayout" {
 			SortOrder = Enum.SortOrder.LayoutOrder,
@@ -442,7 +461,13 @@ local function EditKeyView(): Frame
 							-- TODO: Show confirmation modal
 							Store.discardChanges()
 						end
-						Store.setView("browse")
+						-- Return to the view we came from (query or browse)
+						local prev = Store.previousView()
+						if prev == "query" then
+							Store.setView("query")
+						else
+							Store.setView("browse")
+						end
 					end,
 					
 					action(function(btn)
@@ -551,6 +576,21 @@ local function EditKeyView(): Frame
 						VerticalAlignment = Enum.VerticalAlignment.Center,
 						Padding = UDim.new(0, 8),
 					},
+
+					-- Query button
+					Button({
+						text = "Query",
+						onClick = function()
+							local key = Store.currentKey()
+							if key then
+								Store.queryKeyListText(key)
+							end
+							Store.setView("query")
+						end,
+						variant = "ghost",
+						size = "small",
+						tooltip = "Query this key",
+					}),
 
 					-- Export button
 					create "Frame" {
@@ -723,12 +763,16 @@ local function EditKeyView(): Frame
 					onClear = function()
 						Store.setSearchQuery("")
 					end,
+					focusRef = searchFocusRef,
 					patternError = function(): string?
 						if Store.useRegex() then
 							local err = Store.searchError()
 							return if err ~= "" then err else nil
 						end
 						return nil
+					end,
+					dropdownPortal = function(dropdown: Frame)
+						dropdown.Parent = dropdownPortalFrame
 					end,
 				}),
 				},
@@ -1015,38 +1059,9 @@ local function EditKeyView(): Frame
 						searchQuery = Store.searchQuery,
 						searchResults = Store.searchResults,
 						currentSearchResult = Store.currentSearchResult,
-						expandedPaths = function()
-							return expandedPaths()
-						end,
+						expandRef = expandRef,
 						onScrollPathChange = function(path)
 							scrollPath(path)
-						end,
-						onToggleExpand = function(path)
-							local pathKey = table.concat(
-								Functional.map(path, function(p)
-									return tostring(p)
-								end),
-								"."
-							)
-							local current = expandedPaths()
-							local newPaths = Functional.deepClone(current)
-							newPaths[pathKey] = not newPaths[pathKey]
-							expandedPaths(newPaths)
-						end,
-						onExpandPaths = function(paths: { { string | number } })
-							-- Expand multiple paths at once (doesn't toggle, just ensures expanded)
-							local current = expandedPaths()
-							local newPaths = Functional.deepClone(current)
-							for _, path in paths do
-								local pathKey = table.concat(
-									Functional.map(path, function(p)
-										return tostring(p)
-									end),
-									"."
-								)
-								newPaths[pathKey] = true -- Always expand, don't toggle
-							end
-							expandedPaths(newPaths)
 						end,
 						useAlternatingColors = function()
 							return Store.settings().useAlternatingKeyColors
@@ -1256,6 +1271,8 @@ local function EditKeyView(): Frame
 				},
 			},
 		},
+
+		}, -- end Content frame
 	}
 end
 

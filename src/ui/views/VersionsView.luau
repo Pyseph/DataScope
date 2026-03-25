@@ -14,6 +14,8 @@ local Diff = require(script.Parent.Parent.Parent.utils.Diff)
 local KeyViewLoader = require(script.Parent.Parent.Parent.datastore.KeyViewLoader)
 
 local Button = require(script.Parent.Parent.components.Button)
+local Modal = require(script.Parent.Parent.components.Modal)
+local Tooltip = require(script.Parent.Parent.components.Tooltip)
 
 local create = Vide.create
 local source = Vide.source
@@ -33,6 +35,10 @@ local function VersionsView(): Frame
 	local compareVersionB = source(nil :: string?)
 	local compareLoading = source(false)
 	local versionDataCache = source({} :: { [string]: KeyData })
+
+	-- Restore confirmation state
+	local restoreConfirmVersion = source(nil :: VersionInfo?)
+	local isRestoring = source(false)
 
 	-- Field history scanner state
 	type ScanResult = {
@@ -124,6 +130,43 @@ local function VersionsView(): Frame
 		return true, keyResult.value, nil
 	end
 
+	local function restoreVersion(versionId: string)
+		local connection = Store.connection()
+		local keyName = Store.currentKey()
+		if not connection or not keyName then
+			Store.showToast("error", "No active DataStore connection")
+			return
+		end
+
+		isRestoring(true)
+		local ok, data, err = getVersionData(versionId)
+		if not ok or not data then
+			Store.showToast("error", err or "Failed to load version data")
+			isRestoring(false)
+			return
+		end
+
+		local dsResult = Operations.getDataStore(connection)
+		if not dsResult.success then
+			Store.showToast("error", `Failed to get DataStore: {dsResult.error}`)
+			isRestoring(false)
+			return
+		end
+
+		local datastore = dsResult.value :: DataStore
+		local setResult = Operations.setKey(datastore, keyName, data.value, data.userIds, data.metadata)
+		isRestoring(false)
+
+		if not setResult.success then
+			Store.showToast("error", `Restore failed: {setResult.error}`)
+			return
+		end
+
+		Store.showToast("success", "Version restored successfully")
+		restoreConfirmVersion(nil)
+		loadVersions()
+	end
+
 	local function getPreparedVersionData(versionId: string, setActiveHook: boolean?): (boolean, KeyData?, string?)
 		local ok, rawData, err = getVersionData(versionId)
 		if not ok or not rawData then
@@ -145,13 +188,7 @@ local function VersionsView(): Frame
 		return true, prepared.keyData, nil
 	end
 
-	local function pathToKey(path: { string | number }): string
-		local parts = {}
-		for _, p in path do
-			table.insert(parts, tostring(p))
-		end
-		return table.concat(parts, ".")
-	end
+	local pathToKey = Functional.pathToKey
 
 	local function setPathValue(rootValue: any, path: { string | number }, value: any): any
 		if #path == 0 then
@@ -631,7 +668,7 @@ end
 
 			create "TextButton" {
 				LayoutOrder = 1,
-				Size = UDim2.new(1, -84, 1, 0),
+				Size = UDim2.new(1, if index > 1 and not v.isDeleted then -152 else -84, 1, 0),
 				BackgroundTransparency = 1,
 				Text = "",
 
@@ -640,6 +677,11 @@ end
 						loadVersion(v.version)
 					end
 				end,
+
+				action(function(btn: TextButton)
+					local text = if v.isDeleted then "Deleted version" else "View this version"
+					Tooltip.addTooltip(btn, text, "top", 0.4)
+				end),
 
 				create "Frame" {
 					Size = UDim2.fromScale(1, 1),
@@ -834,6 +876,10 @@ end
 						setCompareSlot("A", v)
 					end,
 
+					action(function(btn: TextButton)
+						Tooltip.addTooltip(btn, "Set as version A for comparison", "top", 0.4)
+					end),
+
 					create "UICorner" {
 						CornerRadius = UDim.new(0, 4),
 					},
@@ -875,13 +921,47 @@ end
 						setCompareSlot("B", v)
 					end,
 
+					action(function(btn: TextButton)
+						Tooltip.addTooltip(btn, "Set as version B for comparison", "top", 0.4)
+					end),
+
 					create "UICorner" {
 						CornerRadius = UDim.new(0, 4),
 					},
 				},
 			},
-		}
-	end
+
+		-- Restore button (only for non-current, non-deleted versions)
+		if index > 1 and not v.isDeleted then create "TextButton" {
+			LayoutOrder = 3,
+			Size = UDim2.fromOffset(60, 32),
+			BackgroundColor3 = function()
+				return theme.colors().warning
+			end,
+			BackgroundTransparency = 0.85,
+			BorderSizePixel = 0,
+			Text = "Restore",
+			TextColor3 = function()
+				return theme.colors().warning
+			end,
+			TextSize = theme.fontSize.small,
+			FontFace = theme.fontLight,
+			AutoButtonColor = false,
+
+			Activated = function()
+				restoreConfirmVersion(v)
+			end,
+
+			action(function(btn: TextButton)
+				Tooltip.addTooltip(btn, "Restore this version as the current value", "top", 0.4)
+			end),
+
+			create "UICorner" {
+				CornerRadius = UDim.new(0, 4),
+			},
+		 } else nil,
+	}
+end
 
 	-- Scan result row component
 	local ScanResultRow = function(result: () -> ScanResult, index: number): Frame
@@ -1051,6 +1131,10 @@ end
 			return theme.colors().background
 		end,
 		BorderSizePixel = 0,
+
+		create "Frame" {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
 
 		create "UIListLayout" {
 			SortOrder = Enum.SortOrder.LayoutOrder,
@@ -1718,6 +1802,153 @@ end
 				},
 			},
 		},
+		},
+
+	-- Restore confirmation modal
+	Modal({
+		isOpen = function()
+			return restoreConfirmVersion() ~= nil
+		end,
+		onClose = function()
+			if not isRestoring() then
+				restoreConfirmVersion(nil)
+			end
+		end,
+		title = "Restore Version",
+		size = "small",
+		closeOnBackdrop = true,
+		children = {
+			create "Frame" {
+				LayoutOrder = 1,
+				Size = UDim2.new(1, 0, 0, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				BackgroundTransparency = 1,
+
+				create "UIListLayout" {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					Padding = UDim.new(0, 16),
+				},
+
+				-- Intro text with colored key name
+				create "TextLabel" {
+					LayoutOrder = 1,
+					Size = UDim2.new(1, 0, 0, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					BackgroundTransparency = 1,
+					Text = function()
+						local v = restoreConfirmVersion()
+						if not v then return "" end
+						local c = theme.colors().accent
+						local h = string.format(
+							"#%02X%02X%02X",
+							math.round(c.R * 255),
+							math.round(c.G * 255),
+							math.round(c.B * 255)
+						)
+						return `This will overwrite the current value of <font color="{h}">&quot;{Store.currentKey()}&quot;</font> with the data from version:`
+					end,
+					TextColor3 = function()
+						return theme.colors().foreground
+					end,
+					TextSize = theme.fontSize.normal,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					TextWrapped = true,
+					RichText = true,
+					FontFace = theme.font,
+				},
+
+				-- Version ID code block
+				create "Frame" {
+					LayoutOrder = 2,
+					Size = UDim2.new(1, 0, 0, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					BackgroundColor3 = function()
+						return theme.colors().backgroundTertiary
+					end,
+
+					create "UICorner" {
+						CornerRadius = UDim.new(0, theme.radius.sm),
+					},
+
+					create "UIPadding" {
+						PaddingLeft = UDim.new(0, 12),
+						PaddingRight = UDim.new(0, 12),
+						PaddingTop = UDim.new(0, 8),
+						PaddingBottom = UDim.new(0, 8),
+					},
+
+					create "TextLabel" {
+						Size = UDim2.new(1, 0, 0, 0),
+						AutomaticSize = Enum.AutomaticSize.Y,
+						BackgroundTransparency = 1,
+						Text = function()
+							local v = restoreConfirmVersion()
+							return if v then v.version else ""
+						end,
+						TextColor3 = function()
+							return theme.colors().accent
+						end,
+						TextSize = theme.fontSize.small,
+						TextXAlignment = Enum.TextXAlignment.Left,
+						TextWrapped = true,
+						FontFace = theme.fontMono,
+					},
+				},
+
+				-- Warning
+				create "TextLabel" {
+					LayoutOrder = 3,
+					Size = UDim2.new(1, 0, 0, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					BackgroundTransparency = 1,
+					Text = "This action cannot be undone.",
+					TextColor3 = function()
+						return theme.colors().error
+					end,
+					TextSize = theme.fontSize.normal,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					TextWrapped = true,
+					FontFace = theme.font,
+				},
+
+				create "Frame" {
+					LayoutOrder = 2,
+					Size = UDim2.new(1, 0, 0, 36),
+					BackgroundTransparency = 1,
+
+					create "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						HorizontalAlignment = Enum.HorizontalAlignment.Right,
+						VerticalAlignment = Enum.VerticalAlignment.Center,
+						Padding = UDim.new(0, 8),
+					},
+
+					Button({
+						text = "Cancel",
+						variant = "ghost",
+						onClick = function()
+							restoreConfirmVersion(nil)
+						end,
+						disabled = isRestoring,
+					}),
+
+					Button({
+						text = function()
+							return if isRestoring() then "Restoring..." else "Restore"
+						end,
+						variant = "danger",
+						onClick = function()
+							local v = restoreConfirmVersion()
+							if v then
+								task.spawn(restoreVersion, v.version)
+							end
+						end,
+						disabled = isRestoring,
+					}),
+				},
+			},
+		},
+	}),
 	}
 end
 

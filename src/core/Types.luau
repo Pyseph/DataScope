@@ -156,4 +156,14 @@ export type DiffViewState = {
 	pathFilter: { [string]: boolean },
 }
 
+-- Query result for cross-key queries
+export type QueryResult = {
+	keyName: string,
+	keyData: KeyData?,
+	matched: boolean,
+	matchedPaths: { { string | number } }?,
+	summary: string,
+	error: string?,
+}
+
 return nil

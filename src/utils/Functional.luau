@@ -508,6 +508,15 @@ function Functional.default<T>(value: T?, defaultValue: T): T
 	return value
 end
 
+-- Convert path array to dot-separated string key (e.g. {"stats", "level"} -> "stats.level")
+function Functional.pathToKey(path: { string | number }): string
+	local parts = {}
+	for _, p in path do
+		table.insert(parts, tostring(p))
+	end
+	return table.concat(parts, ".")
+end
+
 -- Clamp number
 function Functional.clamp(value: number, min: number, max: number): number
 	return math.max(min, math.min(max, value))

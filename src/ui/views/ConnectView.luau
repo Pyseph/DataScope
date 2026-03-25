@@ -127,8 +127,7 @@ local function ConnectView(): Frame
 	local HistoryItem =
 		function(record: () -> Types.HistoryRecord, index: number, onSelect: (Types.HistoryRecord) -> ()): Frame
 			local isHovered = source(false)
-			local r = record()
-			
+
 			local targetBackgroundColor = derive(function()
 				local c = theme.colors()
 				if isHovered() then
@@ -136,7 +135,7 @@ local function ConnectView(): Frame
 				end
 				return c.backgroundSecondary
 			end)
-			
+
 			local backgroundColor = spring(targetBackgroundColor, 0.1)
 			local scale = spring(function()
 				return if isHovered() then 1.01 else 1
@@ -147,7 +146,7 @@ local function ConnectView(): Frame
 				Size = UDim2.new(1, 0, 0, 64),
 				BackgroundColor3 = backgroundColor,
 				BorderSizePixel = 0,
-				
+
 				create "UIScale" {
 					Scale = scale,
 				},
@@ -201,7 +200,9 @@ local function ConnectView(): Frame
 							BackgroundColor3 = function()
 								return theme.colors().accent
 							end,
-							Text = r.connectionInfo.datastoreType,
+							Text = function()
+								return record().connectionInfo.datastoreType
+							end,
 							TextColor3 = Color3.new(1, 1, 1),
 							TextSize = theme.fontSize.small,
 							FontFace = theme.fontMedium,
@@ -215,7 +216,9 @@ local function ConnectView(): Frame
 						create "TextLabel" {
 							Size = UDim2.new(1, -100, 0, 24),
 							BackgroundTransparency = 1,
-							Text = r.connectionInfo.name,
+							Text = function()
+								return record().connectionInfo.name
+							end,
 							TextColor3 = function()
 								return theme.colors().foreground
 							end,
@@ -232,7 +235,7 @@ local function ConnectView(): Frame
 							Image = theme.icons.pin,
 							ImageColor3 = function()
 								local c = theme.colors()
-								if r.pinned then
+								if record().pinned then
 									return c.accent
 								end
 								return c.foregroundMuted
@@ -248,7 +251,10 @@ local function ConnectView(): Frame
 						LayoutOrder = 2,
 						Size = UDim2.new(1, 0, 0, 16),
 						BackgroundTransparency = 1,
-						Text = if r.connectionInfo.scope then `Scope: {r.connectionInfo.scope}` else "No scope",
+						Text = function()
+							local r = record()
+							return if r.connectionInfo.scope then `Scope: {r.connectionInfo.scope}` else "No scope"
+						end,
 						TextColor3 = function()
 							return theme.colors().foregroundMuted
 						end,
