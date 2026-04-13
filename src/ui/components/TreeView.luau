@@ -8,7 +8,10 @@ local Vide = require(script.Parent.Parent.Parent.Packages.Vide)
 local Theme = require(script.Parent.Parent.Theme)
 local Types = require(script.Parent.Parent.Parent.core.Types)
 local Functional = require(script.Parent.Parent.Parent.utils.Functional)
+local LuaLiteral = require(script.Parent.Parent.Parent.utils.LuaLiteral)
+local Store = require(script.Parent.Parent.Parent.core.Store)
 local VirtualizedList = require(script.Parent.VirtualizedList)
+local Button = require(script.Parent.Button)
 local Tooltip = require(script.Parent.Tooltip)
 
 local create = Vide.create
@@ -45,6 +48,7 @@ export type TreeViewProps = {
 	useAlternatingColors: (() -> boolean)?,
 	onScrollPathChange: ((path: { string | number }) -> ())?,
 	diffPathKinds: (() -> { [string]: DiffFieldKind })?,
+	diffPathBeforeValues: (() -> { [string]: JSONValue })?,
 	visiblePathFilter: (() -> { [string]: boolean })?,
 }
 
@@ -201,6 +205,460 @@ local function tintColor(base: Color3, tint: Color3, amount: number): Color3
 	)
 end
 
+local function toHex(color: Color3): string
+	return string.format("#%02x%02x%02x",
+		math.floor(color.R * 255),
+		math.floor(color.G * 255),
+		math.floor(color.B * 255))
+end
+
+-- Compute visual {line, col} from a character index in wrapped text
+local function charToVisual(text: string, charIdx: number, charsPerLine: number): (number, number)
+	local before = string.sub(text, 1, charIdx - 1)
+	local lines = string.split(before, "\n")
+	local visualLine = 0
+	local col = 0
+
+	for i, line in lines do
+		if i < #lines then
+			local wraps = if #line == 0 then 1 else math.ceil(#line / charsPerLine)
+			visualLine += wraps
+		else
+			if #line == 0 then
+				col = 0
+			else
+				local wraps = math.floor(#line / charsPerLine)
+				visualLine += wraps
+				col = #line - wraps * charsPerLine
+			end
+		end
+	end
+
+	return visualLine, col
+end
+
+local function openTableEditor(
+	path: { string | number },
+	currentValue: JSONValue,
+	onValueChange: ((path: { string | number }, newValue: JSONValue) -> ())?
+)
+	if not onValueChange then return end
+
+	-- Build path display string
+	local pathStr = "root"
+	for _, segment in path do
+		if type(segment) == "number" then
+			pathStr ..= `[{segment}]`
+		else
+			pathStr ..= `.{segment}`
+		end
+	end
+
+	Store.openModal(function()
+		local theme = Theme.get()
+		local editorText = source(LuaLiteral.toLuaValuePretty(currentValue))
+		local parseError = source(nil :: string?)
+
+		-- Cursor and selection state
+		local cursorX = source(0)
+		local cursorY = source(0)
+		local isFocused = source(false)
+		local cursorVisible = source(true)
+		local monoCharWidth = source(7.8)
+		local monoLineHeight = source(theme.fontSize.normal + 2)
+		local contentHeight = source(theme.fontSize.normal + 2)
+
+		local selTopVisible = source(false)
+		local selTopPos = source(UDim2.fromOffset(0, 0))
+		local selTopSize = source(UDim2.fromOffset(0, 0))
+		local selMidVisible = source(false)
+		local selMidPos = source(UDim2.fromOffset(0, 0))
+		local selMidSize = source(UDim2.fromOffset(0, 0))
+		local selBotVisible = source(false)
+		local selBotPos = source(UDim2.fromOffset(0, 0))
+		local selBotSize = source(UDim2.fromOffset(0, 0))
+
+		-- Measure monospace character width and line height
+		task.spawn(function()
+			local TextService = game:GetService("TextService")
+			local ok, size = pcall(function()
+				local p = Instance.new("GetTextBoundsParams")
+				p.Text = "M"
+				p.Font = theme.fontMono
+				p.Size = theme.fontSize.normal
+				p.Width = math.huge
+				return TextService:GetTextBoundsAsync(p)
+			end)
+			if ok then
+				monoCharWidth(size.X)
+			end
+			-- Measure actual line height by comparing 1-line vs 2-line bounds
+			local ok2, oneLineH, twoLineH = pcall(function()
+				local p1 = Instance.new("GetTextBoundsParams")
+				p1.Text = "M"
+				p1.Font = theme.fontMono
+				p1.Size = theme.fontSize.normal
+				p1.Width = math.huge
+				local s1 = TextService:GetTextBoundsAsync(p1)
+				local p2 = Instance.new("GetTextBoundsParams")
+				p2.Text = "M\nM"
+				p2.Font = theme.fontMono
+				p2.Size = theme.fontSize.normal
+				p2.Width = math.huge
+				local s2 = TextService:GetTextBoundsAsync(p2)
+				return s1.Y, s2.Y
+			end)
+			if ok2 then
+				monoLineHeight(twoLineH - oneLineH)
+			end
+		end)
+
+		-- Cursor blink loop
+		task.spawn(function()
+			while true do
+				task.wait(0.53)
+				if isFocused() then
+					cursorVisible(not cursorVisible())
+				end
+			end
+		end)
+
+		local function getSyntaxColors(): LuaLiteral.SyntaxColors
+			local c = theme.colors()
+			return {
+				keyword = toHex(c.accent),
+				string = toHex(c.success),
+				number = toHex(c.warning),
+				boolean = toHex(c.accent),
+				operator = toHex(c.foregroundSecondary),
+				default = toHex(c.foreground),
+			}
+		end
+
+		return create "Frame" {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+
+			create "UIListLayout" {
+				SortOrder = Enum.SortOrder.LayoutOrder,
+				Padding = UDim.new(0, 8),
+			},
+
+			-- Path label
+			create "TextLabel" {
+				LayoutOrder = 1,
+				Size = UDim2.new(1, 0, 0, 18),
+				BackgroundTransparency = 1,
+				Text = pathStr,
+				TextColor3 = function() return theme.colors().foregroundMuted end,
+				TextSize = theme.fontSize.small,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				FontFace = theme.fontMono,
+			},
+
+			-- Editor container (fills remaining space: total - path(18) - gap(8) - gap(8) - buttons(32))
+			create "Frame" {
+				LayoutOrder = 2,
+				Size = UDim2.new(1, 0, 1, -74),
+				BackgroundColor3 = function() return theme.colors().backgroundTertiary end,
+				BorderSizePixel = 0,
+				ClipsDescendants = true,
+
+				create "UICorner" { CornerRadius = UDim.new(0, theme.radius.md) },
+				create "UIStroke" {
+					Color = function()
+						if parseError() then
+							return theme.colors().error
+						end
+						return theme.colors().border
+					end,
+					Thickness = 1,
+				},
+
+				create "ScrollingFrame" {
+					Size = UDim2.fromScale(1, 1),
+					BackgroundTransparency = 1,
+					ScrollBarThickness = 4,
+					ScrollingDirection = Enum.ScrollingDirection.Y,
+					CanvasSize = function()
+						return UDim2.fromOffset(0, contentHeight() + 16)
+					end,
+					ScrollBarImageColor3 = function() return theme.colors().foregroundMuted end,
+					BorderSizePixel = 0,
+
+					create "UIPadding" {
+						PaddingLeft = UDim.new(0, 12),
+						PaddingRight = UDim.new(0, 12),
+						PaddingTop = UDim.new(0, 8),
+						PaddingBottom = UDim.new(0, 8),
+					},
+
+					-- Syntax-highlighted display (behind TextBox)
+					create "TextLabel" {
+						Name = "Highlight",
+						Size = function()
+							return UDim2.new(1, 0, 0, contentHeight())
+						end,
+						BackgroundTransparency = 1,
+						RichText = true,
+						Text = function()
+							return LuaLiteral.highlightLuaLiteral(editorText(), getSyntaxColors())
+						end,
+						TextColor3 = function() return theme.colors().foreground end,
+						TextSize = theme.fontSize.normal,
+						TextXAlignment = Enum.TextXAlignment.Left,
+						TextYAlignment = Enum.TextYAlignment.Top,
+						FontFace = theme.fontMono,
+						TextWrapped = true,
+						ZIndex = 1,
+					},
+
+					-- Selection highlight frames (behind text, ZIndex 0)
+					create "Frame" {
+						Name = "SelectionTop",
+						Position = selTopPos,
+						Size = selTopSize,
+						BackgroundColor3 = function() return theme.colors().accent end,
+						BackgroundTransparency = 0.7,
+						Visible = selTopVisible,
+						ZIndex = 0,
+						BorderSizePixel = 0,
+					},
+					create "Frame" {
+						Name = "SelectionMid",
+						Position = selMidPos,
+						Size = selMidSize,
+						BackgroundColor3 = function() return theme.colors().accent end,
+						BackgroundTransparency = 0.7,
+						Visible = selMidVisible,
+						ZIndex = 0,
+						BorderSizePixel = 0,
+					},
+					create "Frame" {
+						Name = "SelectionBot",
+						Position = selBotPos,
+						Size = selBotSize,
+						BackgroundColor3 = function() return theme.colors().accent end,
+						BackgroundTransparency = 0.7,
+						Visible = selBotVisible,
+						ZIndex = 0,
+						BorderSizePixel = 0,
+					},
+
+					-- Invisible TextBox for input (explicit size, no AutomaticSize)
+					create "TextBox" {
+						Name = "Editor",
+						Size = function()
+							return UDim2.new(1, 0, 0, contentHeight())
+						end,
+						BackgroundTransparency = 1,
+						Text = editorText,
+						TextColor3 = Color3.new(1, 1, 1),
+						TextTransparency = 1,
+						TextSize = theme.fontSize.normal,
+						TextXAlignment = Enum.TextXAlignment.Left,
+						TextYAlignment = Enum.TextYAlignment.Top,
+						FontFace = theme.fontMono,
+						ClearTextOnFocus = false,
+						MultiLine = true,
+						TextWrapped = true,
+						ZIndex = 2,
+
+						FocusLost = function()
+							isFocused(false)
+							selTopVisible(false)
+							selMidVisible(false)
+							selBotVisible(false)
+						end,
+
+						action(function(tb: TextBox)
+							-- Compute content height from text
+							local function measureContentHeight()
+								local text = tb.Text
+								local cw = monoCharWidth()
+								local containerWidth = math.max(1, tb.AbsoluteSize.X)
+								local charsPerLine = math.max(1, math.floor(containerWidth / cw))
+								local lh = monoLineHeight()
+
+								-- Count total visual lines
+								local totalLines = 0
+								local lines = string.split(text, "\n")
+								for _, line in lines do
+									local wraps = if #line == 0 then 1 else math.ceil(#line / charsPerLine)
+									totalLines += wraps
+								end
+
+								contentHeight(math.max(lh, totalLines * lh))
+							end
+
+							local function updateCursorAndSelection()
+								local lh = monoLineHeight()
+								local cursorPos = tb.CursorPosition
+								local selStart = tb.SelectionStart
+								local text = tb.Text
+								local cw = monoCharWidth()
+								local containerWidth = math.max(1, tb.AbsoluteSize.X)
+								local charsPerLine = math.max(1, math.floor(containerWidth / cw))
+
+								-- Update cursor position
+								if cursorPos >= 1 then
+									local cLine, cCol = charToVisual(text, cursorPos, charsPerLine)
+									cursorX(math.floor(cCol * cw))
+									cursorY(cLine * lh)
+								end
+
+								-- Update selection
+								if selStart >= 1 and cursorPos >= 1 and selStart ~= cursorPos then
+									local fromIdx = math.min(selStart, cursorPos)
+									local toIdx = math.max(selStart, cursorPos)
+
+									local startLine, startCol = charToVisual(text, fromIdx, charsPerLine)
+									local endLine, endCol = charToVisual(text, toIdx, charsPerLine)
+
+									if startLine == endLine then
+										selTopPos(UDim2.fromOffset(math.floor(startCol * cw), startLine * lh))
+										selTopSize(UDim2.fromOffset(math.floor((endCol - startCol) * cw), lh))
+										selTopVisible(true)
+										selMidVisible(false)
+										selBotVisible(false)
+									else
+										selTopPos(UDim2.fromOffset(math.floor(startCol * cw), startLine * lh))
+										selTopSize(UDim2.fromOffset(math.floor(containerWidth - startCol * cw), lh))
+										selTopVisible(true)
+
+										local midLines = endLine - startLine - 1
+										if midLines > 0 then
+											selMidPos(UDim2.fromOffset(0, (startLine + 1) * lh))
+											selMidSize(UDim2.fromOffset(math.floor(containerWidth), midLines * lh))
+											selMidVisible(true)
+										else
+											selMidVisible(false)
+										end
+
+										if endCol > 0 then
+											selBotPos(UDim2.fromOffset(0, endLine * lh))
+											selBotSize(UDim2.fromOffset(math.floor(endCol * cw), lh))
+											selBotVisible(true)
+										else
+											selBotVisible(false)
+										end
+									end
+								else
+									selTopVisible(false)
+									selMidVisible(false)
+									selBotVisible(false)
+								end
+							end
+
+							tb:GetPropertyChangedSignal("CursorPosition"):Connect(function()
+								cursorVisible(true)
+								updateCursorAndSelection()
+							end)
+
+							tb:GetPropertyChangedSignal("SelectionStart"):Connect(function()
+								cursorVisible(true)
+								updateCursorAndSelection()
+							end)
+
+							tb:GetPropertyChangedSignal("Text"):Connect(function()
+								editorText(tb.Text)
+								local ok, _ = LuaLiteral.parseLuaValue(tb.Text)
+								parseError(if ok then nil else "Invalid Lua table syntax")
+								measureContentHeight()
+								updateCursorAndSelection()
+							end)
+
+							tb.Focused:Connect(function()
+								isFocused(true)
+								cursorVisible(true)
+								task.defer(function()
+									measureContentHeight()
+									updateCursorAndSelection()
+								end)
+							end)
+
+							-- Initial measurement
+							task.defer(function()
+								measureContentHeight()
+								tb:CaptureFocus()
+							end)
+						end),
+					},
+
+					-- Custom blinking cursor
+					create "Frame" {
+						Name = "Cursor",
+						Position = function()
+							return UDim2.fromOffset(cursorX(), cursorY())
+						end,
+						Size = function()
+							return UDim2.fromOffset(1, monoLineHeight())
+						end,
+						BackgroundColor3 = function() return theme.colors().foreground end,
+						Visible = function()
+							return isFocused() and cursorVisible()
+						end,
+						ZIndex = 3,
+						BorderSizePixel = 0,
+					},
+				},
+			},
+
+			-- Error message
+			show(function() return parseError() ~= nil end, function()
+				return create "TextLabel" {
+					LayoutOrder = 3,
+					Size = UDim2.new(1, 0, 0, 16),
+					BackgroundTransparency = 1,
+					Text = function() return parseError() or "" end,
+					TextColor3 = function() return theme.colors().error end,
+					TextSize = theme.fontSize.small,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					FontFace = theme.font,
+				}
+			end),
+
+			-- Button row
+			create "Frame" {
+				LayoutOrder = 4,
+				Size = UDim2.new(1, 0, 0, 32),
+				BackgroundTransparency = 1,
+
+				create "UIListLayout" {
+					FillDirection = Enum.FillDirection.Horizontal,
+					HorizontalAlignment = Enum.HorizontalAlignment.Right,
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					Padding = UDim.new(0, 8),
+				},
+
+				Button({
+					text = "Cancel",
+					variant = "secondary",
+					size = "medium",
+					onClick = function()
+						Store.closeModal()
+					end,
+				}),
+
+				Button({
+					text = "Save",
+					variant = "primary",
+					size = "medium",
+					disabled = function() return parseError() ~= nil end,
+					onClick = function()
+						local text = editorText()
+						local ok, parsed = LuaLiteral.parseLuaValue(text)
+						if ok then
+							onValueChange(path, parsed)
+							Store.closeModal()
+						end
+					end,
+				}),
+			},
+		}
+	end, "Edit Table")
+end
+
 local function TreeView(props: TreeViewProps): Frame
 	local theme = Theme.get()
 
@@ -300,6 +758,10 @@ local function TreeView(props: TreeViewProps): Frame
 
 	local diffPathKinds: () -> { [string]: DiffFieldKind } = props.diffPathKinds or function()
 		return {} :: { [string]: DiffFieldKind }
+	end
+
+	local diffPathBeforeValues: () -> { [string]: JSONValue } = props.diffPathBeforeValues or function()
+		return {} :: { [string]: JSONValue }
 	end
 
 	local visiblePathFilter: () -> { [string]: boolean } = props.visiblePathFilter or function()
@@ -574,10 +1036,15 @@ local function TreeView(props: TreeViewProps): Frame
 			if n == nil then
 				return
 			end
-			if type(n.value) ~= "table" then
-				editValue(tostring(n.value))
-				isEditing(true)
+			if typeof(n.value) == "buffer" then
+				return
 			end
+			if type(n.value) == "table" then
+				openTableEditor(n.path, n.value, props.onValueChange)
+				return
+			end
+			editValue(tostring(n.value))
+			isEditing(true)
 		end
 
 		local finishEdit = function(newText: string)
@@ -601,6 +1068,13 @@ local function TreeView(props: TreeViewProps): Frame
 				newValue = false
 			elseif tonumber(newText) then
 				newValue = tonumber(newText)
+			elseif string.sub(newText, 1, 1) == "{" then
+				local ok, parsed = LuaLiteral.parseLuaValue(newText)
+				if ok then
+					newValue = parsed
+				else
+					newValue = newText
+				end
 			else
 				-- String - remove quotes if present
 				if string.sub(newText, 1, 1) == '"' and string.sub(newText, -1) == '"' then
@@ -637,8 +1111,8 @@ local function TreeView(props: TreeViewProps): Frame
 					if (n.isObject or n.isArray) and n.childCount > 0 then
 						-- Toggle expand for objects/arrays
 						toggleExpand(n.path)
-					elseif type(n.value) ~= "table" then
-						-- Start editing for primitive values (string, number, boolean)
+					else
+						-- Start editing for any value (primitives, empty tables)
 						startEdit()
 					end
 				end
@@ -868,6 +1342,14 @@ local function TreeView(props: TreeViewProps): Frame
 					Text = function()
 						local n = node()
 						if n == nil then return "" end
+						local highlightKind = nodeHighlightKind()
+						if highlightKind == "changed" then
+							local beforeValues = diffPathBeforeValues()
+							local beforeVal = beforeValues[pathToKey(n.path)]
+							if beforeVal ~= nil then
+								return formatValue(beforeVal) .. " → " .. formatValue(n.value)
+							end
+						end
 						return formatValue(n.value)
 					end,
 					TextColor3 = valueColor,
@@ -897,7 +1379,7 @@ local function TreeView(props: TreeViewProps): Frame
 				Visible = function()
 					local n = node()
 					if n == nil then return false end
-					return isHovered() and not isEditing() and type(n.value) ~= "table" and not readOnly()
+					return isHovered() and not isEditing() and typeof(n.value) ~= "buffer" and not readOnly()
 				end,
 
 				Activated = startEdit,

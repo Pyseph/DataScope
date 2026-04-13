@@ -123,6 +123,10 @@ Store.queryError = source(nil :: string?)
 Store.queryVersionMode = source(false)
 Store.queryVersionSeconds = source(3600)
 
+-- Query cache: { [datastoreName::keyName]: { keyData, versions?, fetchedAt } }
+local QUERY_CACHE_TTL = 120
+local queryCache: { [string]: { keyData: Types.KeyData, versions: { any }?, fetchedAt: number } } = {}
+
 -- History state
 Store.history = source({} :: { HistoryRecord })
 Store.onHistoryChanged = nil :: (() -> ())?
@@ -135,6 +139,7 @@ Store.toasts = source({} :: { Toast })
 
 -- Modal state
 Store.modalContent = source(nil :: (() -> Instance)?)
+Store.modalTitle = source(nil :: string?)
 
 -- Derived state (initialized in root scope)
 Store.isModalOpen = nil :: any
@@ -233,6 +238,10 @@ function Store.disconnect()
 	Store.queryTotal(0)
 	Store.queryError(nil)
 	Store.queryVersionMode(false)
+	-- Clear query cache
+	for k in queryCache do
+		queryCache[k] = nil
+	end
 	Store.currentTab("connect")
 	Store.setView("connect")
 end
@@ -819,12 +828,14 @@ function Store.dismissToast(id: string)
 end
 
 -- Modal functions
-function Store.openModal(content: () -> Instance)
+function Store.openModal(content: () -> Instance, title: string?)
+	Store.modalTitle(title)
 	Store.modalContent(content)
 end
 
 function Store.closeModal()
 	Store.modalContent(nil)
+	Store.modalTitle(nil)
 end
 
 -- Query functions
@@ -890,77 +901,98 @@ function Store.startQuery()
 				break
 			end
 
-			-- Check budget with retry
-			local budgetRetries = 0
-			while not Operations.hasBudget(Enum.DataStoreRequestType.GetAsync) do
-				if budgetRetries >= 10 then
-					break
-				end
-				budgetRetries += 1
-				task.wait(1 * budgetRetries)
-			end
+			-- Build cache key from datastore name + key name
+			local cacheKey = connection.name .. "::" .. (connection.scope or "") .. "::" .. keyName
+			local now = os.time()
+			local cached = queryCache[cacheKey]
+			local useCache = cached and (now - cached.fetchedAt) < QUERY_CACHE_TTL
 
-			-- Fetch key data
-			local keyResult = Operations.getKey(datastore, keyName)
-			if not keyResult.success then
-				-- Add error result
-				local results = Functional.deepClone(Store.queryResults())
-				table.insert(results, {
-					keyName = keyName,
-					keyData = nil,
-					matched = false,
-					matchedPaths = nil,
-					summary = "",
-					error = keyResult.error or "Failed to fetch",
-				} :: Types.QueryResult)
-				Store.queryResults(results)
-				Store.queryProgress(i)
-				task.wait()
-				continue
-			end
-
-			-- Decompress data via hook system before querying
-			local rawKeyData = keyResult.value :: Types.KeyData
-			local hookContext = {
-				datastoreName = connection.name,
-				key = keyName,
-				scope = connection.scope,
-			}
-			local prepared = KeyViewLoader.prepare(rawKeyData, hookContext, false)
-			local keyData = prepared.keyData
-
-			-- Fetch versions if version mode is on
+			local keyData: Types.KeyData
 			local versions: { QueryEngine.VersionEntry }? = nil
-			if versionMode then
-				local now = os.time()
-				local cutoff = now - versionSeconds
-				local versionListResult = Operations.listVersions(datastore, keyName, Enum.SortDirection.Descending, cutoff * 1000)
-				if versionListResult.success then
-					local versionList = versionListResult.value :: { versions: { Types.VersionInfo }, hasMore: boolean }
-					versions = {}
-					for _, vInfo in versionList.versions do
-						if Store.queryCancelled() then
-							break
-						end
-						-- Wait for budget
-						local vBudgetRetries = 0
-						while not Operations.hasBudget(Enum.DataStoreRequestType.GetAsync) do
-							if vBudgetRetries >= 5 then
+
+			if useCache then
+				keyData = cached.keyData
+				if versionMode then
+					versions = cached.versions :: any
+				end
+			else
+				-- Check budget with retry
+				local budgetRetries = 0
+				while not Operations.hasBudget(Enum.DataStoreRequestType.GetAsync) do
+					if budgetRetries >= 10 then
+						break
+					end
+					budgetRetries += 1
+					task.wait(1 * budgetRetries)
+				end
+
+				-- Fetch key data
+				local keyResult = Operations.getKey(datastore, keyName)
+				if not keyResult.success then
+					-- Add error result
+					local results = Functional.deepClone(Store.queryResults())
+					table.insert(results, {
+						keyName = keyName,
+						keyData = nil,
+						matched = false,
+						matchedPaths = nil,
+						summary = "",
+						error = keyResult.error or "Failed to fetch",
+					} :: Types.QueryResult)
+					Store.queryResults(results)
+					Store.queryProgress(i)
+					task.wait()
+					continue
+				end
+
+				-- Decompress data via hook system before querying
+				local rawKeyData = keyResult.value :: Types.KeyData
+				local hookContext = {
+					datastoreName = connection.name,
+					key = keyName,
+					scope = connection.scope,
+				}
+				local prepared = KeyViewLoader.prepare(rawKeyData, hookContext, false)
+				keyData = prepared.keyData
+
+				-- Fetch versions if version mode is on
+				if versionMode then
+					local cutoff = now - versionSeconds
+					local versionListResult = Operations.listVersions(datastore, keyName, Enum.SortDirection.Descending, cutoff * 1000)
+					if versionListResult.success then
+						local versionList = versionListResult.value :: { versions: { Types.VersionInfo }, hasMore: boolean }
+						versions = {}
+						for _, vInfo in versionList.versions do
+							if Store.queryCancelled() then
 								break
 							end
-							vBudgetRetries += 1
-							task.wait(1)
-						end
-						local vResult = Operations.getKeyVersion(datastore, keyName, vInfo.version)
-						if vResult.success then
-							local vPrepared = KeyViewLoader.prepare(vResult.value :: Types.KeyData, hookContext, false)
-							table.insert(versions :: any, {
-								version = vInfo,
-								data = vPrepared.keyData,
-							})
+							-- Wait for budget
+							local vBudgetRetries = 0
+							while not Operations.hasBudget(Enum.DataStoreRequestType.GetAsync) do
+								if vBudgetRetries >= 5 then
+									break
+								end
+								vBudgetRetries += 1
+								task.wait(1)
+							end
+							local vResult = Operations.getKeyVersion(datastore, keyName, vInfo.version)
+							if vResult.success then
+								local vPrepared = KeyViewLoader.prepare(vResult.value :: Types.KeyData, hookContext, false)
+								table.insert(versions :: any, {
+									version = vInfo,
+									data = vPrepared.keyData,
+								})
+							end
 						end
 					end
 				end
+
+				-- Store in cache
+				queryCache[cacheKey] = {
+					keyData = keyData,
+					versions = versions :: any,
+					fetchedAt = now,
+				}
 			end
 
 			-- Evaluate expression

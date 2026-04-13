@@ -1073,6 +1073,13 @@ local function EditKeyView(): Frame
 							end
 							return {}
 						end,
+						diffPathBeforeValues = function()
+							local diffView = Store.diffView()
+							if diffView then
+								return diffView.pathBeforeValues
+							end
+							return {}
+						end,
 						visiblePathFilter = function()
 							local diffView = Store.diffView()
 							if diffView then

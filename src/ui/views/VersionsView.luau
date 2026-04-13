@@ -214,7 +214,7 @@ local function VersionsView(): Frame
 	local function buildDiffProjection(
 		versionBData: KeyData,
 		entries: { DiffEntry }
-	): (any, { [string]: DiffFieldKind }, { [string]: boolean }, number)
+	): (any, { [string]: DiffFieldKind }, { [string]: boolean }, { [string]: JSONValue }, number)
 		local function addNestedPaths(pathFilter: { [string]: boolean }, basePath: { string | number }, value: any)
 			if type(value) ~= "table" then
 				return
@@ -232,6 +232,7 @@ local function VersionsView(): Frame
 		local diffData = Functional.deepClone(versionBData.value)
 		local pathKinds = {} :: { [string]: DiffFieldKind }
 		local pathFilter = {} :: { [string]: boolean }
+		local pathBeforeValues = {} :: { [string]: JSONValue }
 		local focusedCount = 0
 
 		for _, entry in entries do
@@ -261,6 +262,7 @@ local function VersionsView(): Frame
 				local entryPathKey = pathToKey(entry.path)
 				pathKinds[entryPathKey] = "changed"
 				pathFilter[entryPathKey] = true
+				pathBeforeValues[entryPathKey] = entry.before
 
 				-- Show nested contents of the new (after) value if it's a container
 				local branchValue = entry.after
@@ -270,7 +272,7 @@ local function VersionsView(): Frame
 			end
 		end
 
-		return diffData, pathKinds, pathFilter, focusedCount
+		return diffData, pathKinds, pathFilter, pathBeforeValues, focusedCount
 	end
 
 	local function openDiffInEditor()
@@ -296,7 +298,7 @@ local function VersionsView(): Frame
 		end
 
 		local entries = Diff.compute(preparedA.value, preparedB.value)
-		local diffData, pathKinds, pathFilter, focusedCount = buildDiffProjection(preparedB, entries)
+		local diffData, pathKinds, pathFilter, pathBeforeValues, focusedCount = buildDiffProjection(preparedB, entries)
 		if focusedCount == 0 then
 			Store.showToast("info", "No differences found between the selected versions")
 			compareLoading(false)
@@ -313,6 +315,7 @@ local function VersionsView(): Frame
 			versionB = versionB,
 			pathKinds = pathKinds,
 			pathFilter = pathFilter,
+			pathBeforeValues = pathBeforeValues,
 		})
 		Store.setView("editKey")
 		Store.showToast("info", `Opened diff view with {focusedCount} changed field{if focusedCount == 1 then "" else "s"}`)

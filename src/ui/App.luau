@@ -71,6 +71,7 @@ local function App(props: AppProps): Frame
 					return true
 				end,
 				onClose = Store.closeModal,
+				title = Store.modalTitle(),
 				size = "large",
 				children = children,
 			})

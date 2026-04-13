@@ -27,10 +27,17 @@ local function Modal(props: ModalProps): Frame
 	local sizes = {
 		small = UDim2.fromOffset(360, 0),
 		medium = UDim2.fromOffset(520, 0),
-		large = UDim2.fromOffset(720, 0),
+		large = UDim2.new(0.9, 0, 0.8, 0),
 	}
 
+	local maxWidths = {
+		large = 720,
+	}
+
+	-- Large modals use fixed height (scale-based), others auto-size
+	local isFixedHeight = (props.size == "large")
 	local modalSize = sizes[props.size or "medium"]
+	local maxWidth = maxWidths[props.size or "medium"]
 	local closeOnBackdrop = if props.closeOnBackdrop == nil then true else props.closeOnBackdrop
 
 	local isOpen = props.isOpen
@@ -75,7 +82,7 @@ local function Modal(props: ModalProps): Frame
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromScale(0.5, 0.5),
 			Size = modalSize,
-			AutomaticSize = Enum.AutomaticSize.Y,
+			AutomaticSize = if isFixedHeight then Enum.AutomaticSize.None else Enum.AutomaticSize.Y,
 			BackgroundColor3 = function()
 				return theme.colors().background
 			end,
@@ -94,6 +101,10 @@ local function Modal(props: ModalProps): Frame
 				Scale = scale,
 			},
 
+			if maxWidth then create "UISizeConstraint" {
+				MaxSize = Vector2.new(maxWidth, math.huge),
+			} else nil,
+
 			create "UICorner" {
 				CornerRadius = UDim.new(0, theme.radius.lg),
 			},
@@ -107,8 +118,8 @@ local function Modal(props: ModalProps): Frame
 			},
 
 			create "Frame" {
-				Size = UDim2.new(1, 0, 0, 0),
-				AutomaticSize = Enum.AutomaticSize.Y,
+				Size = if isFixedHeight then UDim2.fromScale(1, 1) else UDim2.new(1, 0, 0, 0),
+				AutomaticSize = if isFixedHeight then Enum.AutomaticSize.None else Enum.AutomaticSize.Y,
 				BackgroundTransparency = 1,
 
 				create "UIListLayout" {
@@ -195,8 +206,10 @@ local function Modal(props: ModalProps): Frame
 				-- Content
 				create "Frame" {
 					LayoutOrder = 2,
-					Size = UDim2.new(1, 0, 0, 0),
-					AutomaticSize = Enum.AutomaticSize.Y,
+					Size = if isFixedHeight
+						then UDim2.new(1, 0, 1, if props.title then -44 else 0)
+						else UDim2.new(1, 0, 0, 0),
+					AutomaticSize = if isFixedHeight then Enum.AutomaticSize.None else Enum.AutomaticSize.Y,
 					BackgroundTransparency = 1,
 
 					create "UIPadding" {
@@ -207,15 +220,15 @@ local function Modal(props: ModalProps): Frame
 					},
 
 					create "Frame" {
-						Size = UDim2.new(1, 0, 0, 0),
-						AutomaticSize = Enum.AutomaticSize.Y,
+						Size = if isFixedHeight then UDim2.fromScale(1, 1) else UDim2.new(1, 0, 0, 0),
+						AutomaticSize = if isFixedHeight then Enum.AutomaticSize.None else Enum.AutomaticSize.Y,
 						BackgroundTransparency = 1,
 
 						create "UIListLayout" {
 							SortOrder = Enum.SortOrder.LayoutOrder,
 							Padding = UDim.new(0, 16),
 						},
-						
+
 						-- Apply transparency to children if possible, or just let them fade with the container
 						unpack(props.children),
 					},

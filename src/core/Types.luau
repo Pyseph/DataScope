@@ -154,6 +154,7 @@ export type DiffViewState = {
 	versionB: string,
 	pathKinds: { [string]: DiffFieldKind },
 	pathFilter: { [string]: boolean },
+	pathBeforeValues: { [string]: JSONValue },
 }
 
 -- Query result for cross-key queries
