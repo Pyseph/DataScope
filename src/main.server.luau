@@ -26,12 +26,14 @@ end
 
 -- Plugin setup
 local toolbar = plugin:CreateToolbar("DataScope")
+
 local button = toolbar:CreateButton(
 	"DataScope",
 	"Open DataScope - DataStore Editor",
 	"rbxassetid://6034509993",
 	"DataScope"
 )
+button.ClickableWhenViewportHidden = true
 
 -- Create widget
 local widgetInfo = DockWidgetPluginGuiInfo.new(
