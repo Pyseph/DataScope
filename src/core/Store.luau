@@ -20,6 +20,7 @@ type ConnectionInfo = Types.ConnectionInfo
 type KeyData = Types.KeyData
 type HistoryRecord = Types.HistoryRecord
 type Settings = Types.Settings
+type KeyTemplate = Types.KeyTemplate
 type Toast = Types.Toast
 type UndoAction = Types.UndoAction
 type JSONValue = Types.JSONValue
@@ -27,6 +28,177 @@ type DiffViewState = Types.DiffViewState
 
 local MAX_UNDO_STACK = 64
 local MAX_HISTORY_RECORDS = 32
+local MAX_KEY_TEMPLATES = 24
+local MAX_TEMPLATE_CACHE_RECORDS = 64
+
+local DEFAULT_KEY_TEMPLATES: { KeyTemplate } = {
+	{
+		id = "userid",
+		label = "UserId",
+		template = "{userid}",
+	},
+	{
+		id = "player_userid",
+		label = "Player",
+		template = "Player_{userid}",
+	},
+}
+
+local function trim(value: string): string
+	return string.match(value, "^%s*(.-)%s*$") or ""
+end
+
+local function buildTemplateId(label: string, existingIds: { [string]: boolean }): string
+	local base = string.lower(label)
+	base = string.gsub(base, "[^%w]+", "_")
+	base = string.gsub(base, "^_+", "")
+	base = string.gsub(base, "_+$", "")
+
+	if base == "" then
+		base = "template"
+	end
+
+	local id = base
+	local suffix = 2
+	while existingIds[id] do
+		id = `{base}_{suffix}`
+		suffix += 1
+	end
+
+	return id
+end
+
+local function renderTemplate(template: string, userId: number): (string?, string?)
+	local rendered = template
+	local userIdText = tostring(userId)
+
+	rendered = string.gsub(rendered, "{userid}", userIdText)
+	rendered = string.gsub(rendered, "{userId}", userIdText)
+	rendered = string.gsub(rendered, "{UserId}", userIdText)
+
+	for token in string.gmatch(rendered, "{[^}]*}") do
+		return nil, "Unknown placeholder \"" .. token .. "\". Only {userid} is supported."
+	end
+
+	if string.find(rendered, "{", 1, true) or string.find(rendered, "}", 1, true) then
+		return nil, "Malformed placeholder. Use {userid}."
+	end
+
+	local valid, errorMessage = Operations.validateKey(rendered)
+	if not valid then
+		return nil, errorMessage
+	end
+
+	return rendered, nil
+end
+
+local function validateTemplateFields(label: string, template: string): (boolean, string?)
+	local cleanLabel = trim(label)
+	local cleanTemplate = trim(template)
+
+	if cleanLabel == "" then
+		return false, "Template name cannot be empty"
+	end
+	if #cleanLabel > 32 then
+		return false, "Template name cannot exceed 32 characters"
+	end
+	if cleanTemplate == "" then
+		return false, "Template cannot be empty"
+	end
+	if #cleanTemplate > 50 then
+		return false, "Template cannot exceed 50 characters"
+	end
+	if not string.find(cleanTemplate, "{userid}", 1, true)
+		and not string.find(cleanTemplate, "{userId}", 1, true)
+		and not string.find(cleanTemplate, "{UserId}", 1, true)
+	then
+		return false, "Template must include {userid}"
+	end
+
+	local _, errorMessage = renderTemplate(cleanTemplate, 123456789)
+	if errorMessage then
+		return false, errorMessage
+	end
+
+	return true, nil
+end
+
+local function sanitizeTemplates(value: any): { KeyTemplate }
+	local templates: { KeyTemplate } = {}
+	local existingIds: { [string]: boolean } = {}
+
+	if type(value) == "table" then
+		for _, candidate in value :: any do
+			if #templates >= MAX_KEY_TEMPLATES then
+				break
+			end
+
+			if type(candidate) == "table" then
+				local label = if type(candidate.label) == "string" then trim(candidate.label) else ""
+				local template = if type(candidate.template) == "string" then trim(candidate.template) else ""
+				local valid = validateTemplateFields(label, template)
+
+				if valid then
+					local id = if type(candidate.id) == "string" and #candidate.id > 0 and #candidate.id <= 64
+						then candidate.id
+						else buildTemplateId(label, existingIds)
+
+					if existingIds[id] then
+						id = buildTemplateId(label, existingIds)
+					end
+
+					existingIds[id] = true
+					table.insert(templates, {
+						id = id,
+						label = label,
+						template = template,
+					})
+				end
+			end
+		end
+	end
+
+	if #templates == 0 then
+		return Functional.deepClone(DEFAULT_KEY_TEMPLATES)
+	end
+
+	return templates
+end
+
+local function hasTemplateId(templates: { KeyTemplate }, id: string): boolean
+	for _, template in templates do
+		if template.id == id then
+			return true
+		end
+	end
+	return false
+end
+
+local function getTemplateById(templates: { KeyTemplate }, id: string): KeyTemplate?
+	for _, template in templates do
+		if template.id == id then
+			return template
+		end
+	end
+	return nil
+end
+
+local function encodeCachePart(value: string): string
+	return `{#value}:{value}`
+end
+
+local function getConnectionTemplateCacheKey(info: ConnectionInfo?): string?
+	if not info then
+		return nil
+	end
+
+	return table.concat({
+		info.datastoreType,
+		if info.allScopes then "all" else "scoped",
+		encodeCachePart(info.name),
+		encodeCachePart(info.scope or ""),
+	}, "|")
+end
 
 -- Default settings
 local defaultSettings: Settings = {
@@ -40,6 +212,9 @@ local defaultSettings: Settings = {
 	clickToOpen = false,
 	viewerMode = "Tree",
 	bufferViewerMode = "Hex",
+	keyTemplates = Functional.deepClone(DEFAULT_KEY_TEMPLATES),
+	selectedKeyTemplateId = "userid",
+	storeKeyTemplateSelections = {},
 }
 
 local Store = {}
@@ -130,6 +305,7 @@ local queryCache: { [string]: { keyData: Types.KeyData, versions: { any }?, fetc
 -- History state
 Store.history = source({} :: { HistoryRecord })
 Store.onHistoryChanged = nil :: (() -> ())?
+Store.onSettingsChanged = nil :: (() -> ())?
 
 -- Settings state
 Store.settings = source(Functional.deepClone(defaultSettings))
@@ -705,6 +881,12 @@ local function notifyHistoryChanged()
 	end
 end
 
+local function notifySettingsChanged()
+	if Store.onSettingsChanged then
+		Store.onSettingsChanged()
+	end
+end
+
 function Store.addHistoryRecord(connectionInfo: ConnectionInfo)
 	local historyVal = Store.history()
 	local newHistory = Functional.filter(historyVal, function(record)
@@ -790,11 +972,227 @@ function Store.updateSetting<T>(key: string, value: T)
 	local settingsVal = Store.settings()
 	local newSettings = Functional.deepClone(settingsVal)
 	;(newSettings :: any)[key] = value
-	Store.settings(newSettings)
+	Store.settings(Store.normalizeSettings(newSettings))
+	notifySettingsChanged()
 end
 
 function Store.resetSettings()
 	Store.settings(Functional.deepClone(defaultSettings))
+	notifySettingsChanged()
+end
+
+function Store.normalizeSettings(settings: any): Settings
+	local normalized = Functional.deepClone(defaultSettings)
+
+	if type(settings) ~= "table" then
+		return normalized
+	end
+
+	if settings.themePreset == "Studio" or settings.themePreset == "Dark" or settings.themePreset == "Light" then
+		normalized.themePreset = settings.themePreset
+	end
+	if type(settings.themeAccent) == "string" then
+		normalized.themeAccent = settings.themeAccent
+	end
+	if type(settings.hideGameName) == "boolean" then
+		normalized.hideGameName = settings.hideGameName
+	end
+	if settings.highlightColors == "Default" or settings.highlightColors == "ScriptEditor" then
+		normalized.highlightColors = settings.highlightColors
+	end
+	if type(settings.useAlternatingKeyColors) == "boolean" then
+		normalized.useAlternatingKeyColors = settings.useAlternatingKeyColors
+	end
+	if type(settings.listDeletedKeys) == "boolean" then
+		normalized.listDeletedKeys = settings.listDeletedKeys
+	end
+	if type(settings.automaticallyList) == "boolean" then
+		normalized.automaticallyList = settings.automaticallyList
+	end
+	if type(settings.clickToOpen) == "boolean" then
+		normalized.clickToOpen = settings.clickToOpen
+	end
+	if settings.viewerMode == "Tree" or settings.viewerMode == "Code" then
+		normalized.viewerMode = settings.viewerMode
+	end
+	if settings.bufferViewerMode == "Hex" or settings.bufferViewerMode == "Deserializer" then
+		normalized.bufferViewerMode = settings.bufferViewerMode
+	end
+
+	normalized.keyTemplates = sanitizeTemplates(settings.keyTemplates)
+
+	local selectedId = if type(settings.selectedKeyTemplateId) == "string" then settings.selectedKeyTemplateId else ""
+	if hasTemplateId(normalized.keyTemplates, selectedId) then
+		normalized.selectedKeyTemplateId = selectedId
+	else
+		normalized.selectedKeyTemplateId = normalized.keyTemplates[1].id
+	end
+
+	normalized.storeKeyTemplateSelections = {}
+	if type(settings.storeKeyTemplateSelections) == "table" then
+		local count = 0
+		for cacheKey, templateId in settings.storeKeyTemplateSelections :: any do
+			if count >= MAX_TEMPLATE_CACHE_RECORDS then
+				break
+			end
+
+			if type(cacheKey) == "string"
+				and type(templateId) == "string"
+				and #cacheKey <= 200
+				and hasTemplateId(normalized.keyTemplates, templateId)
+			then
+				normalized.storeKeyTemplateSelections[cacheKey] = templateId
+				count += 1
+			end
+		end
+	end
+
+	return normalized
+end
+
+function Store.validateKeyTemplate(label: string, template: string): (boolean, string?)
+	return validateTemplateFields(label, template)
+end
+
+function Store.getSelectedKeyTemplateId(): string
+	local settingsVal = Store.normalizeSettings(Store.settings())
+	local cacheKey = getConnectionTemplateCacheKey(Store.connection())
+	if cacheKey then
+		local cachedId = settingsVal.storeKeyTemplateSelections[cacheKey]
+		if cachedId and hasTemplateId(settingsVal.keyTemplates, cachedId) then
+			return cachedId
+		end
+	end
+
+	return settingsVal.selectedKeyTemplateId
+end
+
+function Store.getSelectedKeyTemplate(): KeyTemplate
+	local settingsVal = Store.normalizeSettings(Store.settings())
+	local selectedId = Store.getSelectedKeyTemplateId()
+	return getTemplateById(settingsVal.keyTemplates, selectedId) or settingsVal.keyTemplates[1]
+end
+
+function Store.selectKeyTemplateForCurrentStore(templateId: string): (boolean, string?)
+	local settingsVal = Store.normalizeSettings(Store.settings())
+	if not hasTemplateId(settingsVal.keyTemplates, templateId) then
+		return false, "Unknown key template"
+	end
+
+	local newSettings = Functional.deepClone(settingsVal)
+	newSettings.selectedKeyTemplateId = templateId
+
+	local cacheKey = getConnectionTemplateCacheKey(Store.connection())
+	if cacheKey then
+		newSettings.storeKeyTemplateSelections[cacheKey] = templateId
+	end
+
+	Store.settings(Store.normalizeSettings(newSettings))
+	notifySettingsChanged()
+	return true, nil
+end
+
+function Store.renderSelectedKeyTemplate(userId: number): (string?, string?)
+	local selected = Store.getSelectedKeyTemplate()
+	return renderTemplate(selected.template, userId)
+end
+
+function Store.addKeyTemplate(label: string, template: string): (boolean, string?)
+	local cleanLabel = trim(label)
+	local cleanTemplate = trim(template)
+	local valid, errorMessage = validateTemplateFields(cleanLabel, cleanTemplate)
+	if not valid then
+		return false, errorMessage
+	end
+
+	local settingsVal = Store.normalizeSettings(Store.settings())
+	if #settingsVal.keyTemplates >= MAX_KEY_TEMPLATES then
+		return false, `Key template limit reached ({MAX_KEY_TEMPLATES})`
+	end
+
+	local existingIds: { [string]: boolean } = {}
+	for _, existing in settingsVal.keyTemplates do
+		existingIds[existing.id] = true
+	end
+
+	local newSettings = Functional.deepClone(settingsVal)
+	table.insert(newSettings.keyTemplates, {
+		id = buildTemplateId(cleanLabel, existingIds),
+		label = cleanLabel,
+		template = cleanTemplate,
+	})
+
+	Store.settings(Store.normalizeSettings(newSettings))
+	notifySettingsChanged()
+	return true, nil
+end
+
+function Store.updateKeyTemplate(id: string, label: string, template: string): (boolean, string?)
+	local cleanLabel = trim(label)
+	local cleanTemplate = trim(template)
+	local valid, errorMessage = validateTemplateFields(cleanLabel, cleanTemplate)
+	if not valid then
+		return false, errorMessage
+	end
+
+	local settingsVal = Store.normalizeSettings(Store.settings())
+	local newSettings = Functional.deepClone(settingsVal)
+	local found = false
+
+	for index, existing in newSettings.keyTemplates do
+		if existing.id == id then
+			newSettings.keyTemplates[index] = {
+				id = id,
+				label = cleanLabel,
+				template = cleanTemplate,
+			}
+			found = true
+			break
+		end
+	end
+
+	if not found then
+		return false, "Unknown key template"
+	end
+
+	Store.settings(Store.normalizeSettings(newSettings))
+	notifySettingsChanged()
+	return true, nil
+end
+
+function Store.removeKeyTemplate(id: string): (boolean, string?)
+	local settingsVal = Store.normalizeSettings(Store.settings())
+	if #settingsVal.keyTemplates <= 1 then
+		return false, "Keep at least one key template"
+	end
+
+	local newTemplates: { KeyTemplate } = {}
+	for _, existing in settingsVal.keyTemplates do
+		if existing.id ~= id then
+			table.insert(newTemplates, existing)
+		end
+	end
+
+	if #newTemplates == #settingsVal.keyTemplates then
+		return false, "Unknown key template"
+	end
+
+	local newSettings = Functional.deepClone(settingsVal)
+	newSettings.keyTemplates = newTemplates
+
+	if not hasTemplateId(newTemplates, newSettings.selectedKeyTemplateId) then
+		newSettings.selectedKeyTemplateId = newTemplates[1].id
+	end
+
+	for cacheKey, templateId in newSettings.storeKeyTemplateSelections do
+		if templateId == id then
+			newSettings.storeKeyTemplateSelections[cacheKey] = nil
+		end
+	end
+
+	Store.settings(Store.normalizeSettings(newSettings))
+	notifySettingsChanged()
+	return true, nil
 end
 
 -- Toast functions

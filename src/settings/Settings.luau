@@ -37,7 +37,7 @@ function Settings.load(plugin: Plugin)
 	local savedSettings = decodeSaved(rawSettings)
 	if savedSettings then
 		local defaults = Store.getDefaultSettings()
-		local merged = Functional.merge(defaults, savedSettings)
+		local merged = Store.normalizeSettings(Functional.merge(defaults, savedSettings))
 		Store.settings(merged)
 	end
 
@@ -51,7 +51,8 @@ end
 
 -- Save all settings to plugin storage
 function Settings.save(plugin: Plugin)
-	local settings = Store.settings()
+	local settings = Store.normalizeSettings(Store.settings())
+	Store.settings(settings)
 	pcall(function()
 		plugin:SetSetting(SETTINGS_KEY, HttpService:JSONEncode(settings))
 	end)
@@ -74,10 +75,18 @@ end
 
 -- Clear all saved data
 function Settings.clear(plugin: Plugin)
+	local previousSettingsChanged = Store.onSettingsChanged
+	local previousHistoryChanged = Store.onHistoryChanged
+	Store.onSettingsChanged = nil
+	Store.onHistoryChanged = nil
+
 	plugin:SetSetting(SETTINGS_KEY, nil)
 	plugin:SetSetting(HISTORY_KEY, nil)
 	Store.resetSettings()
 	Store.clearHistory()
+
+	Store.onSettingsChanged = previousSettingsChanged
+	Store.onHistoryChanged = previousHistoryChanged
 end
 
 return Settings

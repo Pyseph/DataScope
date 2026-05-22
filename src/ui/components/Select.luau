@@ -101,6 +101,7 @@ local function Select<T>(props: SelectProps<T>): Frame
 			BorderSizePixel = 0,
 			Text = "",
 			AutoButtonColor = false,
+			ZIndex = 101,
 
 			Activated = function()
 				props.onChange(option.value)
@@ -123,6 +124,7 @@ local function Select<T>(props: SelectProps<T>): Frame
 			create "Frame" {
 				Size = UDim2.fromScale(1, 1),
 				BackgroundTransparency = 1,
+				ZIndex = 102,
 
 				create "UIListLayout" {
 					FillDirection = Enum.FillDirection.Horizontal,
@@ -136,6 +138,7 @@ local function Select<T>(props: SelectProps<T>): Frame
 						Size = UDim2.fromOffset(16, 16),
 						BackgroundTransparency = 1,
 						Image = option.icon,
+						ZIndex = 103,
 						ImageColor3 = function()
 							local c = theme.colors()
 							if isSelected() then
@@ -150,6 +153,7 @@ local function Select<T>(props: SelectProps<T>): Frame
 					LayoutOrder = 2,
 					Size = UDim2.new(1, -24, 1, 0),
 					BackgroundTransparency = 1,
+					ZIndex = 102,
 
 					create "UIListLayout" {
 						SortOrder = Enum.SortOrder.LayoutOrder,
@@ -161,6 +165,7 @@ local function Select<T>(props: SelectProps<T>): Frame
 						Size = UDim2.new(1, 0, 0, 18),
 						BackgroundTransparency = 1,
 						Text = option.label,
+						ZIndex = 103,
 						TextColor3 = function()
 							local c = theme.colors()
 							if isSelected() then
@@ -179,6 +184,7 @@ local function Select<T>(props: SelectProps<T>): Frame
 							Size = UDim2.new(1, 0, 0, 14),
 							BackgroundTransparency = 1,
 							Text = option.description,
+							ZIndex = 103,
 							TextColor3 = function()
 								local c = theme.colors()
 								if isSelected() then
@@ -200,6 +206,7 @@ local function Select<T>(props: SelectProps<T>): Frame
 					BackgroundTransparency = 1,
 					Image = theme.icons.check,
 					ImageColor3 = Color3.new(1, 1, 1),
+					ZIndex = 103,
 					Visible = isSelected,
 				},
 			},
@@ -211,6 +218,9 @@ local function Select<T>(props: SelectProps<T>): Frame
 		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundTransparency = 1,
 		ClipsDescendants = false,
+		ZIndex = function()
+			return if isOpen() then 100 else 1
+		end,
 
 		create "UIListLayout" {
 			SortOrder = Enum.SortOrder.LayoutOrder,
@@ -247,6 +257,9 @@ local function Select<T>(props: SelectProps<T>): Frame
 			BorderSizePixel = 0,
 			Text = "",
 			AutoButtonColor = false,
+			ZIndex = function()
+				return if isOpen() then 100 else 1
+			end,
 
 			Activated = function()
 				if not disabled() then
@@ -281,6 +294,9 @@ local function Select<T>(props: SelectProps<T>): Frame
 			create "Frame" {
 				Size = UDim2.fromScale(1, 1),
 				BackgroundTransparency = 1,
+				ZIndex = function()
+					return if isOpen() then 101 else 2
+				end,
 
 				create "UIListLayout" {
 					FillDirection = Enum.FillDirection.Horizontal,
@@ -292,6 +308,9 @@ local function Select<T>(props: SelectProps<T>): Frame
 					Size = UDim2.new(1, -24, 1, 0),
 					BackgroundTransparency = 1,
 					Text = displayText,
+					ZIndex = function()
+						return if isOpen() then 102 else 3
+					end,
 					TextColor3 = function()
 						local c = theme.colors()
 						local selected = selectedOption()
@@ -309,6 +328,9 @@ local function Select<T>(props: SelectProps<T>): Frame
 					Size = UDim2.fromOffset(16, 16),
 					BackgroundTransparency = 1,
 					Image = theme.icons.chevronDown,
+					ZIndex = function()
+						return if isOpen() then 102 else 3
+					end,
 					ImageColor3 = function()
 						return theme.colors().foregroundMuted
 					end,
@@ -325,7 +347,10 @@ local function Select<T>(props: SelectProps<T>): Frame
 			Position = UDim2.new(0, 0, 0, if props.label then 62 else 40),
 			Size = UDim2.new(1, 0, 0, 0),
 			AutomaticSize = Enum.AutomaticSize.Y,
-			BackgroundTransparency = 1,
+			BackgroundColor3 = function()
+				return theme.colors().backgroundSecondary
+			end,
+			BackgroundTransparency = 0,
 			BorderSizePixel = 0,
 			Visible = isOpen,
 			ZIndex = 100,
@@ -349,7 +374,10 @@ local function Select<T>(props: SelectProps<T>): Frame
 
 			create "ScrollingFrame" {
 				Size = UDim2.new(1, 0, 0, math.min(#props.options * 48, 240)),
-				BackgroundTransparency = 1,
+				BackgroundColor3 = function()
+					return theme.colors().backgroundSecondary
+				end,
+				BackgroundTransparency = 0,
 				ScrollBarThickness = 4,
 				ScrollBarImageColor3 = function()
 					return theme.colors().scrollbar

@@ -49,6 +49,12 @@ export type HistoryRecord = {
 	pinned: boolean,
 }
 
+export type KeyTemplate = {
+	id: string,
+	label: string,
+	template: string,
+}
+
 export type ViewMode = "Tree" | "Code"
 export type BufferViewMode = "Hex" | "Deserializer"
 export type ThemePreset = "Studio" | "Light" | "Dark"
@@ -65,6 +71,9 @@ export type Settings = {
 	clickToOpen: boolean,
 	viewerMode: ViewMode,
 	bufferViewerMode: BufferViewMode,
+	keyTemplates: { KeyTemplate },
+	selectedKeyTemplateId: string,
+	storeKeyTemplateSelections: { [string]: string },
 }
 
 -- Hook types for compression/decompression
