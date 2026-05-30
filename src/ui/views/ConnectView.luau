@@ -53,7 +53,11 @@ local function ConnectView(): Frame
 		local result = Operations.listDataStores(nil, nil)
 
 		if result.success then
-			Store.datastoreList(result.value.datastores)
+			local datastoreNames: { string } = {}
+			for _, item in result.value.datastores do
+				table.insert(datastoreNames, item.name)
+			end
+			Store.datastoreList(datastoreNames)
 			Store.hasMoreDatastores(result.value.cursor ~= nil)
 		else
 			Store.datastoreListError(result.error)
