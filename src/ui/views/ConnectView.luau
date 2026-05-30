@@ -14,6 +14,7 @@ local Button = require(script.Parent.Parent.components.Button)
 local TextInput = require(script.Parent.Parent.components.TextInput)
 local Select = require(script.Parent.Parent.components.Select)
 local Tabs = require(script.Parent.Parent.components.Tabs)
+local DataStorePicker = require(script.Parent.Parent.components.DataStorePicker)
 
 local create = Vide.create
 local source = Vide.source
@@ -428,7 +429,7 @@ local function ConnectView(): Frame
 						BackgroundTransparency = 1,
 						ZIndex = 50,
 
-						TextInput({
+						DataStorePicker({
 							value = datastoreName,
 							onChange = function(value)
 								datastoreName(value)

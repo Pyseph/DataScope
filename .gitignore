@@ -16,6 +16,7 @@ DevPackages/
 # wally.lock
 
 # IDE and editor files
+.claude/
 .vscode/
 .idea/
 *.swp

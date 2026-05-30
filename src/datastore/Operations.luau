@@ -62,15 +62,28 @@ function Operations.getDataStore(info: ConnectionInfo): Result<DataStore | Order
 	end
 end
 
+export type DataStoreListItem = {
+	name: string,
+	createdTime: number?,
+	updatedTime: number?,
+}
+
 -- List all DataStores
-function Operations.listDataStores(prefix: string?, cursor: string?): Result<{ datastores: { string }, cursor: string? }>
+function Operations.listDataStores(
+	prefix: string?,
+	cursor: string?
+): Result<{ datastores: { DataStoreListItem }, cursor: string? }>
 	local success, result = pcall(function()
 		local pages = DataStoreService:ListDataStoresAsync(prefix, nil, cursor)
 		local items = pages:GetCurrentPage()
 
-		local datastores: { string } = {}
+		local datastores: { DataStoreListItem } = {}
 		for _, item in items do
-			table.insert(datastores, item.DataStoreName)
+			table.insert(datastores, {
+				name = item.DataStoreName,
+				createdTime = item.CreatedTime,
+				updatedTime = item.UpdatedTime,
+			})
 		end
 
 		local nextCursor: string? = nil
