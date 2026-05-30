@@ -9,5 +9,5 @@ dependencies = []
 
 [[package]]
 name = "pyseph/datascope"
-version = "1.3.0"
+version = "2.2.0"
 dependencies = [["Vide", "centau/vide@0.4.0"]]
