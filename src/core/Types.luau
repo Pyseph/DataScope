@@ -21,6 +21,7 @@ export type KeyInfo = {
 	createdTime: number?,
 	updatedTime: number?,
 	version: string?,
+	orderedValue: number?,
 }
 
 export type OrderedKeyInfo = {

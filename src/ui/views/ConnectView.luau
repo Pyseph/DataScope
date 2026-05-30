@@ -109,10 +109,6 @@ local function ConnectView(): Frame
 		if scopeError() then
 			return false
 		end
-		-- Ordered DataStore requires a scope
-		if dsType == "Ordered" and #scope() == 0 then
-			return false
-		end
 		return true
 	end)
 
@@ -606,7 +602,7 @@ local function ConnectView(): Frame
 						},
 					},
 
-					-- Scope (optional for Normal, required for Ordered)
+					-- Scope
 					create "Frame" {
 						LayoutOrder = 3,
 						Size = UDim2.new(1, formRowWidthOffset, 0, 0),
@@ -623,12 +619,7 @@ local function ConnectView(): Frame
 								handleConnect()
 							end,
 							placeholder = "Enter scope (optional)...",
-							label = function()
-								if datastoreType() == "Ordered" then
-									return "Scope (required)"
-								end
-								return "Scope (optional)"
-							end :: any,
+							label = "Scope (optional)",
 							validate = function(value)
 								if #value == 0 then
 									return true, nil

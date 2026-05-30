@@ -169,14 +169,39 @@ local function BrowseView(): Frame
 			return
 		end
 
-		local datastore = dsResult.value :: DataStore
-		local keysResult = Operations.listKeys(datastore, Store.keyPrefix() or nil, nil)
+		if connection.datastoreType == "Ordered" then
+			local datastore = dsResult.value :: OrderedDataStore
+			local orderedResult = Operations.listOrderedKeys(
+				datastore,
+				Store.orderedAscending(),
+				Store.orderedRangeMin(),
+				Store.orderedRangeMax(),
+				nil
+			)
 
-		if keysResult.success then
-			Store.keyList(keysResult.value.keys)
-			Store.hasMoreKeys(keysResult.value.cursor ~= nil)
+			if orderedResult.success then
+				local keys: { KeyInfo } = {}
+				for _, item in orderedResult.value.keys do
+					table.insert(keys, {
+						key = item.key,
+						orderedValue = item.value,
+					})
+				end
+				Store.keyList(keys)
+				Store.hasMoreKeys(orderedResult.value.hasMore)
+			else
+				Store.keyListError(orderedResult.error)
+			end
 		else
-			Store.keyListError(keysResult.error)
+			local datastore = dsResult.value :: DataStore
+			local keysResult = Operations.listKeys(datastore, Store.keyPrefix() or nil, nil)
+
+			if keysResult.success then
+				Store.keyList(keysResult.value.keys)
+				Store.hasMoreKeys(keysResult.value.cursor ~= nil)
+			else
+				Store.keyListError(keysResult.error)
+			end
 		end
 
 		Store.keyListLoading(false)
@@ -390,9 +415,35 @@ local function BrowseView(): Frame
 						},
 					},
 
-					-- Version badge (always created, visibility controlled reactively)
+					-- Value badge for Ordered DataStores
 					create "TextLabel" {
 						LayoutOrder = 3,
+						Size = UDim2.fromOffset(110, 24),
+						Visible = function()
+							local k = keyInfo()
+							return k ~= nil and k.orderedValue ~= nil
+						end,
+						BackgroundColor3 = function()
+							return theme.colors().backgroundTertiary
+						end,
+						Text = function()
+							local k = keyInfo()
+							return if k and k.orderedValue ~= nil then `Value: {k.orderedValue}` else ""
+						end,
+						TextColor3 = function()
+							return theme.colors().foregroundMuted
+						end,
+						TextSize = theme.fontSize.small,
+						FontFace = theme.fontMono,
+
+						create "UICorner" {
+							CornerRadius = UDim.new(0, 4),
+						},
+					},
+
+					-- Version badge (always created, visibility controlled reactively)
+					create "TextLabel" {
+						LayoutOrder = 4,
 						Size = UDim2.fromOffset(90, 24),
 						Visible = function()
 							local k = keyInfo()
@@ -812,6 +863,10 @@ local function BrowseView(): Frame
 								return `Failed to look up "{keyFilter()}"`
 							end
 							return "No keys match your search"
+						end
+						local conn = Store.connection()
+						if conn and conn.datastoreType == "Ordered" then
+							return "No keys found in this Ordered DataStore"
 						end
 						return "No keys found in this DataStore"
 					end,

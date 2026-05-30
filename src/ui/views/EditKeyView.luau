@@ -129,18 +129,27 @@ local function EditKeyView(): Frame
 			return
 		end
 
-		local datastore = dsResult.value :: DataStore
 		local keyData = Store.currentKeyData()
 		local userIds = keyData and keyData.userIds or nil
+		local result
 
-		local result = Operations.setKey(datastore, keyName, dataToSave, userIds)
+		if connection.datastoreType == "Ordered" then
+			if type(dataToSave) ~= "number" then
+				Store.showToast("error", "Ordered DataStore values must be numbers")
+				Store.isSavingKey(false)
+				return
+			end
+			result = Operations.setOrderedKey(dsResult.value :: OrderedDataStore, keyName, dataToSave :: number)
+		else
+			result = Operations.setKey(dsResult.value :: DataStore, keyName, dataToSave, userIds)
+		end
 
 		if result.success then
 			Store.hasUnsavedChanges(false)
 			Store.showToast("success", "Key saved successfully")
 
 			-- Reload to get updated version info
-			local reloadResult = Operations.getKey(datastore, keyName)
+			local reloadResult = Operations.getKey(dsResult.value :: DataStore, keyName)
 			if reloadResult.success then
 				Store.currentKeyData(reloadResult.value)
 			end
@@ -173,8 +182,12 @@ local function EditKeyView(): Frame
 			return
 		end
 
-		local datastore = dsResult.value :: DataStore
-		local result = Operations.deleteKey(datastore, keyName)
+		local result
+		if connection.datastoreType == "Ordered" then
+			result = Operations.deleteOrderedKey(dsResult.value :: OrderedDataStore, keyName)
+		else
+			result = Operations.deleteKey(dsResult.value :: DataStore, keyName)
+		end
 
 		if result.success then
 			Store.showToast("success", "Key deleted")
