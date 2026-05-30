@@ -10,13 +10,17 @@ local Store = require(script.Parent.Parent.Parent.core.Store)
 
 local Button = require(script.Parent.Parent.components.Button)
 local Select = require(script.Parent.Parent.components.Select)
+local TextInput = require(script.Parent.Parent.components.TextInput)
 
 local create = Vide.create
 local source = Vide.source
 local derive = Vide.derive
+local indexes = Vide.indexes
 
 local function SettingsView(): Frame
 	local theme = Theme.get()
+	local newTemplateLabel = source("")
+	local newTemplateValue = source("Player_{userid}")
 
 	-- Theme preset options
 	local themeOptions = {
@@ -48,6 +52,21 @@ local function SettingsView(): Frame
 		{ value = "Tree", label = "Tree View", description = "Hierarchical tree structure" },
 		{ value = "Code", label = "Code View", description = "JSON code editor" },
 	}
+
+	local keyTemplates = derive(function(): { any }
+		return Store.settings().keyTemplates
+	end)
+
+	local addTemplate = function()
+		local success, errorMessage = Store.addKeyTemplate(newTemplateLabel(), newTemplateValue())
+		if success then
+			newTemplateLabel("")
+			newTemplateValue("Player_{userid}")
+			Store.showToast("success", "Key template saved")
+		else
+			Store.showToast("warning", errorMessage or "Unable to save key template")
+		end
+	end
 
 	-- Toggle setting component
 	local ToggleSetting = function(props: {
@@ -181,6 +200,183 @@ local function SettingsView(): Frame
 		}
 	end
 
+	local KeyTemplateRow = function(template: () -> any, index: number): Frame
+		local isSelected = derive(function()
+			local current = template()
+			return current ~= nil and Store.getSelectedKeyTemplateId() == current.id
+		end)
+
+		return create "Frame" {
+			LayoutOrder = index,
+			Size = UDim2.new(1, 0, 0, 138),
+			BackgroundColor3 = function()
+				local c = theme.colors()
+				return if isSelected() then c.backgroundTertiary else c.backgroundSecondary
+			end,
+			BorderSizePixel = 0,
+			ClipsDescendants = true,
+
+			create "UICorner" {
+				CornerRadius = UDim.new(0, theme.radius.md),
+			},
+
+			create "UIPadding" {
+				PaddingLeft = UDim.new(0, 12),
+				PaddingRight = UDim.new(0, 12),
+				PaddingTop = UDim.new(0, 10),
+				PaddingBottom = UDim.new(0, 10),
+			},
+
+			create "UIListLayout" {
+				SortOrder = Enum.SortOrder.LayoutOrder,
+				Padding = UDim.new(0, 8),
+			},
+
+			create "Frame" {
+				LayoutOrder = 1,
+				Size = UDim2.new(1, 0, 0, 68),
+				BackgroundTransparency = 1,
+
+				create "UIListLayout" {
+					FillDirection = Enum.FillDirection.Horizontal,
+					VerticalAlignment = Enum.VerticalAlignment.Center,
+					Padding = UDim.new(0, 8),
+				},
+
+				create "Frame" {
+					LayoutOrder = 1,
+					Size = UDim2.new(0.35, -4, 1, 0),
+					BackgroundTransparency = 1,
+
+					TextInput({
+						value = function()
+							local current = template()
+							return if current then current.label else ""
+						end,
+						onChange = function(value)
+							local current = template()
+							if not current then
+								return
+							end
+
+							local success, errorMessage = Store.updateKeyTemplate(current.id, value, current.template)
+							if not success then
+								Store.showToast("warning", errorMessage or "Unable to update key template")
+							end
+						end,
+						label = "Name",
+						placeholder = "Player",
+					}),
+				},
+
+				create "Frame" {
+					LayoutOrder = 2,
+					Size = UDim2.new(0.65, -4, 1, 0),
+					BackgroundTransparency = 1,
+
+					TextInput({
+						value = function()
+							local current = template()
+							return if current then current.template else ""
+						end,
+						onChange = function(value)
+							local current = template()
+							if not current then
+								return
+							end
+
+							local success, errorMessage = Store.updateKeyTemplate(current.id, current.label, value)
+							if not success then
+								Store.showToast("warning", errorMessage or "Unable to update key template")
+							end
+						end,
+						label = "Template",
+						placeholder = "Player_{userid}",
+						validate = function(value)
+							local current = template()
+							if not current then
+								return true, nil
+							end
+							return Store.validateKeyTemplate(current.label, value)
+						end,
+					}),
+				},
+			},
+
+			create "Frame" {
+				LayoutOrder = 2,
+				Size = UDim2.new(1, 0, 0, 32),
+				BackgroundTransparency = 1,
+				ClipsDescendants = true,
+
+				create "UIListLayout" {
+					FillDirection = Enum.FillDirection.Horizontal,
+					VerticalAlignment = Enum.VerticalAlignment.Center,
+					Padding = UDim.new(0, 8),
+				},
+
+				create "Frame" {
+					LayoutOrder = 1,
+					Size = UDim2.new(1, -216, 1, 0),
+					BackgroundTransparency = 1,
+
+					create "UIFlexItem" {
+						FlexMode = Enum.UIFlexMode.Fill,
+					},
+				},
+
+				create "Frame" {
+					LayoutOrder = 2,
+					Size = UDim2.fromOffset(112, 32),
+					BackgroundTransparency = 1,
+
+					Button({
+						text = function()
+							return if isSelected() then "Selected" else "Use"
+						end,
+						onClick = function()
+							local current = template()
+							if current then
+								local success, errorMessage = Store.selectKeyTemplateForCurrentStore(current.id)
+								if not success then
+									Store.showToast("warning", errorMessage or "Unable to select key template")
+								end
+							end
+						end,
+						variant = if isSelected() then "primary" else "secondary",
+						size = "small",
+						fullWidth = true,
+					}),
+				},
+
+				create "Frame" {
+					LayoutOrder = 3,
+					Size = UDim2.fromOffset(96, 32),
+					BackgroundTransparency = 1,
+
+					Button({
+						text = "Delete",
+						onClick = function()
+							local current = template()
+							if current then
+								local success, errorMessage = Store.removeKeyTemplate(current.id)
+								if not success then
+									Store.showToast("warning", errorMessage or "Unable to delete key template")
+								end
+							end
+						end,
+						variant = "danger",
+						size = "small",
+						fullWidth = true,
+						disabled = function()
+							return #Store.settings().keyTemplates <= 1
+						end,
+					}),
+				},
+			},
+		}
+	end
+
 	-- Section header component
 	local SectionHeader = function(title: string): TextLabel
 		return create "TextLabel" {
@@ -307,8 +503,8 @@ local function SettingsView(): Frame
 			BorderSizePixel = 0,
 
 			create "UIPadding" {
-				PaddingLeft = UDim.new(0, 16),
-				PaddingRight = UDim.new(0, 16),
+				PaddingLeft = UDim.new(0.02, 16),
+				PaddingRight = UDim.new(0.04, 24),
 				PaddingTop = UDim.new(0, 16),
 				PaddingBottom = UDim.new(0, 16),
 			},
@@ -526,9 +722,135 @@ local function SettingsView(): Frame
 					}),
 				},
 
-				-- About section
+				-- Key templates section
 				create "Frame" {
 					LayoutOrder = 30,
+					Size = UDim2.new(1, 0, 0, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					BackgroundTransparency = 1,
+
+					SectionHeader("KEY TEMPLATES"),
+				},
+
+				create "Frame" {
+					LayoutOrder = 31,
+					Size = UDim2.new(1, 0, 0, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					BackgroundTransparency = 1,
+
+					create "UIListLayout" {
+						SortOrder = Enum.SortOrder.LayoutOrder,
+						Padding = UDim.new(0, 8),
+					},
+
+					indexes(keyTemplates, function(template, index)
+						return KeyTemplateRow(template, index)
+					end),
+				},
+
+				create "Frame" {
+					LayoutOrder = 32,
+					Size = UDim2.new(1, 0, 0, 138),
+					BackgroundColor3 = function()
+						return theme.colors().backgroundSecondary
+					end,
+					BorderSizePixel = 0,
+
+					create "UICorner" {
+						CornerRadius = UDim.new(0, theme.radius.md),
+					},
+
+					create "UIPadding" {
+						PaddingLeft = UDim.new(0, 12),
+						PaddingRight = UDim.new(0, 12),
+						PaddingTop = UDim.new(0, 10),
+						PaddingBottom = UDim.new(0, 10),
+					},
+
+					create "UIListLayout" {
+						SortOrder = Enum.SortOrder.LayoutOrder,
+						Padding = UDim.new(0, 8),
+					},
+
+					create "Frame" {
+						LayoutOrder = 1,
+						Size = UDim2.new(1, 0, 0, 68),
+						BackgroundTransparency = 1,
+
+						create "UIListLayout" {
+							FillDirection = Enum.FillDirection.Horizontal,
+							VerticalAlignment = Enum.VerticalAlignment.Center,
+							Padding = UDim.new(0, 8),
+						},
+
+						create "Frame" {
+							LayoutOrder = 1,
+							Size = UDim2.new(0.35, -4, 1, 0),
+							BackgroundTransparency = 1,
+
+							TextInput({
+								value = newTemplateLabel,
+								onChange = function(value)
+									newTemplateLabel(value)
+								end,
+								onSubmit = function(value)
+									newTemplateLabel(value)
+									addTemplate()
+								end,
+								label = "Name",
+								placeholder = "Player",
+							}),
+						},
+
+						create "Frame" {
+							LayoutOrder = 2,
+							Size = UDim2.new(0.65, -4, 1, 0),
+							BackgroundTransparency = 1,
+
+							TextInput({
+								value = newTemplateValue,
+								onChange = function(value)
+									newTemplateValue(value)
+								end,
+								onSubmit = function(value)
+									newTemplateValue(value)
+									addTemplate()
+								end,
+								label = "Template",
+								placeholder = "Player_{userid}",
+								validate = function(value)
+									return Store.validateKeyTemplate(newTemplateLabel(), value)
+								end,
+							}),
+						},
+					},
+
+					create "Frame" {
+						LayoutOrder = 2,
+						Size = UDim2.new(1, 0, 0, 32),
+						BackgroundTransparency = 1,
+
+						create "UIListLayout" {
+							FillDirection = Enum.FillDirection.Horizontal,
+							HorizontalAlignment = Enum.HorizontalAlignment.Right,
+							VerticalAlignment = Enum.VerticalAlignment.Center,
+						},
+
+						Button({
+							text = "Add Template",
+							onClick = addTemplate,
+							variant = "primary",
+							size = "small",
+							disabled = function()
+								return newTemplateLabel() == "" or newTemplateValue() == ""
+							end,
+						}),
+					},
+				},
+
+				-- About section
+				create "Frame" {
+					LayoutOrder = 40,
 					Size = UDim2.new(1, 0, 0, 0),
 					AutomaticSize = Enum.AutomaticSize.Y,
 					BackgroundTransparency = 1,
@@ -537,7 +859,7 @@ local function SettingsView(): Frame
 				},
 
 				create "TextLabel" {
-					LayoutOrder = 31,
+					LayoutOrder = 41,
 					Size = UDim2.new(1, 0, 0, 60),
 					BackgroundTransparency = 1,
 					Text = "DataScope\nA clean rewrite with Vide\n\nInspired by the original DataScope by pinehappi",

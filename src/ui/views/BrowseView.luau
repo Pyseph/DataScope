@@ -14,6 +14,7 @@ local Functional = require(script.Parent.Parent.Parent.utils.Functional)
 local Players = game:GetService("Players")
 
 local Button = require(script.Parent.Parent.components.Button)
+local Select = require(script.Parent.Parent.components.Select)
 local TextInput = require(script.Parent.Parent.components.TextInput)
 local VirtualizedList = require(script.Parent.Parent.components.VirtualizedList)
 local Tooltip = require(script.Parent.Parent.components.Tooltip)
@@ -36,6 +37,18 @@ local function BrowseView(): Frame
 	local canQuickLogin = derive(function(): boolean
 		local localPlayer = Players.LocalPlayer
 		return localPlayer ~= nil and localPlayer.UserId > 0
+	end)
+
+	local keyTemplateOptions = derive(function(): { any }
+		local options: { any } = {}
+		for _, template in Store.settings().keyTemplates do
+			table.insert(options, {
+				value = template.id,
+				label = template.label,
+				description = template.template,
+			})
+		end
+		return options
 	end)
 
 	-- Auto-lookup state for keys not in the loaded page
@@ -221,12 +234,17 @@ local function BrowseView(): Frame
 			return
 		end
 
-		local userIdKey = tostring(localPlayer.UserId)
-		keyFilter(userIdKey)
-		triggerAutoLookup(userIdKey)
+		local userKey, errorMessage = Store.renderSelectedKeyTemplate(localPlayer.UserId)
+		if not userKey then
+			Store.showToast("warning", errorMessage or "Selected key template is invalid")
+			return
+		end
+
+		keyFilter(userKey)
+		triggerAutoLookup(userKey)
 
 		quickLoginLoading(true)
-		loadKey(userIdKey, true)
+		loadKey(userKey, true)
 		quickLoginLoading(false)
 	end
 
@@ -585,8 +603,9 @@ local function BrowseView(): Frame
 		-- Filter bar
 		create "Frame" {
 			LayoutOrder = 2,
-			Size = UDim2.new(1, 0, 0, 56),
+			Size = UDim2.new(1, 0, 0, 96),
 			BackgroundTransparency = 1,
+			ZIndex = 50,
 
 			create "UIPadding" {
 				PaddingLeft = UDim.new(0, 16),
@@ -598,16 +617,16 @@ local function BrowseView(): Frame
 			create "Frame" {
 				Size = UDim2.fromScale(1, 1),
 				BackgroundTransparency = 1,
+				ZIndex = 50,
 
 				create "UIListLayout" {
-					FillDirection = Enum.FillDirection.Horizontal,
-					VerticalAlignment = Enum.VerticalAlignment.Center,
+					SortOrder = Enum.SortOrder.LayoutOrder,
 					Padding = UDim.new(0, 8),
 				},
 
 				create "Frame" {
 					LayoutOrder = 1,
-					Size = UDim2.new(1, -180, 1, 0),
+					Size = UDim2.new(1, 0, 0, 36),
 					BackgroundTransparency = 1,
 
 					TextInput({
@@ -622,28 +641,62 @@ local function BrowseView(): Frame
 
 				create "Frame" {
 					LayoutOrder = 2,
-					Size = UDim2.fromOffset(172, 36),
+					Size = UDim2.new(1, 0, 0, 36),
 					BackgroundTransparency = 1,
+					ZIndex = 60,
 
-					Button({
-						text = function()
-							if quickLoginLoading() then
-								return "Opening..."
-							end
-							if not canQuickLogin() then
-								return "No LocalPlayer"
-							end
-							return "Open My UserId"
-						end,
-						onClick = quickLoginIntoUserKey,
-						variant = "secondary",
-						icon = theme.icons.key,
-						disabled = function()
-							return quickLoginLoading() or not canQuickLogin()
-						end,
-						tooltip = "Quick-login to key named LocalPlayer.UserId",
-						fullWidth = true,
-					}),
+					create "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						VerticalAlignment = Enum.VerticalAlignment.Center,
+						Padding = UDim.new(0, 8),
+					},
+
+					create "Frame" {
+						LayoutOrder = 1,
+						Size = UDim2.new(1, -180, 1, 0),
+						BackgroundTransparency = 1,
+						ZIndex = 60,
+
+						Select({
+							value = function()
+								return Store.getSelectedKeyTemplateId()
+							end,
+							options = keyTemplateOptions(),
+							onChange = function(value)
+								local success, errorMessage = Store.selectKeyTemplateForCurrentStore(value)
+								if not success then
+									Store.showToast("warning", errorMessage or "Unable to select key template")
+								end
+							end,
+							placeholder = "Template",
+						}),
+					},
+
+					create "Frame" {
+						LayoutOrder = 2,
+						Size = UDim2.fromOffset(172, 36),
+						BackgroundTransparency = 1,
+
+						Button({
+							text = function()
+								if quickLoginLoading() then
+									return "Opening..."
+								end
+								if not canQuickLogin() then
+									return "No LocalPlayer"
+								end
+								return "Open My Key"
+							end,
+							onClick = quickLoginIntoUserKey,
+							variant = "secondary",
+							icon = theme.icons.key,
+							disabled = function()
+								return quickLoginLoading() or not canQuickLogin()
+							end,
+							tooltip = "Open the selected LocalPlayer key template",
+							fullWidth = true,
+						}),
+					},
 				},
 			},
 		},
@@ -651,8 +704,9 @@ local function BrowseView(): Frame
 		-- Key list
 		create "Frame" {
 			LayoutOrder = 3,
-			Size = UDim2.new(1, 0, 1, -120),
+			Size = UDim2.new(1, 0, 1, -160),
 			BackgroundTransparency = 1,
+			ZIndex = 1,
 			
 			-- Loading state
 			show(Store.keyListLoading, function()

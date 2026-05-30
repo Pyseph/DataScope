@@ -41,8 +41,40 @@ local function ConnectView(): Frame
 	-- Form state (pre-populate from last used)
 	local datastoreType = source("Normal" :: DataStoreType)
 	local datastoreName = source(getLastDatastoreName())
+	local datastoreNameFocused = source(false)
 	local scope = source("")
 	local allScopes = source(false)
+
+	local loadDataStores = function()
+		Store.datastoreListLoading(true)
+		Store.datastoreListError(nil)
+
+		local result = Operations.listDataStores(nil, nil)
+
+		if result.success then
+			Store.datastoreList(result.value.datastores)
+			Store.hasMoreDatastores(result.value.cursor ~= nil)
+		else
+			Store.datastoreListError(result.error)
+			Store.showToast("error", `Failed to list DataStores: {result.error}`)
+		end
+
+		Store.datastoreListLoading(false)
+	end
+
+	local suggestedDataStoreNames = derive(function(): { string }
+		local query = string.lower(datastoreName())
+		local suggestions: { string } = {}
+
+		for _, name in Store.datastoreList() do
+			if query == "" or string.find(string.lower(name), query, 1, true) then
+				table.insert(suggestions, name)
+			end
+		end
+
+		table.sort(suggestions)
+		return suggestions
+	end)
 
 	-- Validation
 	local nameError = derive(function(): string?
@@ -266,7 +298,7 @@ local function ConnectView(): Frame
 			}
 		end
 
-	-- Tabs for connect form vs history
+	-- Tabs for connect form and history
 	local tabs = {
 		{ id = "connect", label = "Connect" },
 		{ id = "history", label = "History" },
@@ -279,6 +311,17 @@ local function ConnectView(): Frame
 		allScopes(record.connectionInfo.allScopes)
 		Store.setTab("connect")
 	end
+
+	local selectDataStoreName = function(name: string)
+		datastoreName(name)
+		Store.setTab("connect")
+	end
+
+	task.defer(function()
+		if Store.settings().automaticallyList and #Store.datastoreList() == 0 and not Store.datastoreListLoading() then
+			loadDataStores()
+		end
+	end)
 
 	return create "Frame" {
 		Size = UDim2.fromScale(1, 1),
@@ -381,14 +424,22 @@ local function ConnectView(): Frame
 					-- DataStore Name
 					create "Frame" {
 						LayoutOrder = 2,
-						Size = UDim2.new(1, formRowWidthOffset, 0, 0),
-						AutomaticSize = Enum.AutomaticSize.Y,
+						Size = UDim2.new(1, formRowWidthOffset, 0, 62),
 						BackgroundTransparency = 1,
+						ZIndex = 50,
 
 						TextInput({
 							value = datastoreName,
 							onChange = function(value)
 								datastoreName(value)
+							end,
+							onFocus = function()
+								datastoreNameFocused(true)
+							end,
+							onBlur = function()
+								task.delay(0.15, function()
+									datastoreNameFocused(false)
+								end)
 							end,
 							onSubmit = function(value)
 								datastoreName(value)
@@ -396,6 +447,7 @@ local function ConnectView(): Frame
 							end,
 							placeholder = "Enter DataStore name...",
 							label = "DataStore Name",
+							liveUpdate = true,
 							validate = function(value)
 								if #value == 0 then
 									return true, nil
@@ -403,6 +455,154 @@ local function ConnectView(): Frame
 								return Operations.validateDataStoreName(value)
 							end,
 						}),
+
+						create "Frame" {
+							Position = UDim2.fromOffset(0, 68),
+							Size = function()
+								if Store.datastoreListLoading() or Store.datastoreListError() ~= nil then
+									return UDim2.new(1, 0, 0, 44)
+								end
+
+								return UDim2.new(1, 0, 0, math.min(#suggestedDataStoreNames(), 5) * 36)
+							end,
+							BackgroundColor3 = function()
+								return theme.colors().backgroundSecondary
+							end,
+							BorderSizePixel = 0,
+							ClipsDescendants = true,
+							Visible = function()
+								return Store.settings().automaticallyList
+									and datastoreNameFocused()
+									and (
+										Store.datastoreListLoading()
+										or Store.datastoreListError() ~= nil
+										or #suggestedDataStoreNames() > 0
+									)
+							end,
+							ZIndex = 200,
+
+							create "UICorner" {
+								CornerRadius = UDim.new(0, theme.radius.md),
+							},
+
+							create "UIStroke" {
+								Color = function()
+									return theme.colors().border
+								end,
+								Thickness = 1,
+							},
+
+							create "ScrollingFrame" {
+								Size = UDim2.fromScale(1, 1),
+								BackgroundTransparency = 1,
+								ScrollBarThickness = 4,
+								ScrollBarImageColor3 = function()
+									return theme.colors().scrollbar
+								end,
+								CanvasSize = UDim2.new(0, 0, 0, 0),
+								AutomaticCanvasSize = Enum.AutomaticSize.Y,
+								BorderSizePixel = 0,
+								ZIndex = 201,
+
+								create "UIListLayout" {
+									SortOrder = Enum.SortOrder.LayoutOrder,
+								},
+
+								indexes(suggestedDataStoreNames, function(name, index)
+									local isHovered = source(false)
+
+									return create "TextButton" {
+										LayoutOrder = index,
+										Size = UDim2.new(1, 0, 0, 36),
+										BackgroundColor3 = function()
+											local c = theme.colors()
+											return if isHovered() then c.backgroundTertiary else c.backgroundSecondary
+										end,
+										BorderSizePixel = 0,
+										Text = "",
+										AutoButtonColor = false,
+										ZIndex = 202,
+
+										Activated = function()
+											selectDataStoreName(name())
+											datastoreNameFocused(false)
+										end,
+
+										MouseEnter = function()
+											isHovered(true)
+										end,
+
+										MouseLeave = function()
+											isHovered(false)
+										end,
+
+										create "UIPadding" {
+											PaddingLeft = UDim.new(0, 12),
+											PaddingRight = UDim.new(0, 12),
+										},
+
+										create "Frame" {
+											Size = UDim2.fromScale(1, 1),
+											BackgroundTransparency = 1,
+											ZIndex = 203,
+
+											create "UIListLayout" {
+												FillDirection = Enum.FillDirection.Horizontal,
+												VerticalAlignment = Enum.VerticalAlignment.Center,
+												Padding = UDim.new(0, 10),
+											},
+
+											create "ImageLabel" {
+												LayoutOrder = 1,
+												Size = UDim2.fromOffset(16, 16),
+												BackgroundTransparency = 1,
+												Image = theme.icons.database,
+												ImageColor3 = function()
+													return theme.colors().foregroundSecondary
+												end,
+												ZIndex = 204,
+											},
+
+											create "TextLabel" {
+												LayoutOrder = 2,
+												Size = UDim2.new(1, -26, 1, 0),
+												BackgroundTransparency = 1,
+												Text = name,
+												TextColor3 = function()
+													return theme.colors().foreground
+												end,
+												TextSize = theme.fontSize.normal,
+												TextXAlignment = Enum.TextXAlignment.Left,
+												TextTruncate = Enum.TextTruncate.AtEnd,
+												FontFace = theme.fontMono,
+												ZIndex = 204,
+											},
+										},
+									}
+								end),
+
+								create "TextLabel" {
+									Size = UDim2.new(1, 0, 0, 44),
+									BackgroundTransparency = 1,
+									Text = function()
+										if Store.datastoreListLoading() then
+											return "Loading DataStores..."
+										end
+										return Store.datastoreListError() or ""
+									end,
+									TextColor3 = function()
+										return if Store.datastoreListError() then theme.colors().error else theme.colors().foregroundMuted
+									end,
+									TextSize = theme.fontSize.normal,
+									TextWrapped = true,
+									FontFace = theme.font,
+									Visible = function()
+										return Store.datastoreListLoading() or Store.datastoreListError() ~= nil
+									end,
+									ZIndex = 202,
+								},
+							},
+						},
 					},
 
 					-- Scope (optional for Normal, required for Ordered)

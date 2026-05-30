@@ -77,6 +77,9 @@ local function initialize()
 		-- Save just history (called on every history mutation)
 		Settings.saveHistory(plugin)
 	end
+	Store.onSettingsChanged = function()
+		Settings.save(plugin)
+	end
 
 	-- Register built-in hooks
 	BuiltInHooks.registerAll()
@@ -134,4 +137,3 @@ end
 
 -- Cleanup on unload
 plugin.Unloading:Connect(cleanup)
-

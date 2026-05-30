@@ -21,6 +21,9 @@ export type TextInputProps = {
 	validate: ((value: string) -> (boolean, string?))?,
 	multiline: boolean?,
 	password: boolean?,
+	liveUpdate: boolean?,
+	onFocus: (() -> ())?,
+	onBlur: (() -> ())?,
 	label: (string | () -> string)?,
 	hint: string?,
 	prefix: string?,
@@ -203,6 +206,9 @@ local function TextInput(props: TextInputProps): Frame
 
 							FocusLost = function()
 								isFocused(false)
+								if props.onBlur then
+									props.onBlur()
+								end
 								if textBoxRef then
 									handleChange(textBoxRef.Text)
 								end
@@ -210,6 +216,9 @@ local function TextInput(props: TextInputProps): Frame
 
 							Focused = function()
 								isFocused(true)
+								if props.onFocus then
+									props.onFocus()
+								end
 							end,
 
 							Changed = function(property: string)
@@ -245,6 +254,9 @@ local function TextInput(props: TextInputProps): Frame
 
 						FocusLost = function(enterPressed: boolean)
 							isFocused(false)
+							if props.onBlur then
+								props.onBlur()
+							end
 							if textBoxRef then
 								local currentText = textBoxRef.Text
 								handleChange(currentText)
@@ -256,6 +268,15 @@ local function TextInput(props: TextInputProps): Frame
 
 						Focused = function()
 							isFocused(true)
+							if props.onFocus then
+								props.onFocus()
+							end
+						end,
+
+						Changed = function(property: string)
+							if props.liveUpdate and property == "Text" and textBoxRef then
+								handleChange(textBoxRef.Text)
+							end
 						end,
 					},
 
