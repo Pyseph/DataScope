@@ -9,6 +9,7 @@ local Theme = require(script.Parent.Parent.Theme)
 local Store = require(script.Parent.Parent.Parent.core.Store)
 local Types = require(script.Parent.Parent.Parent.core.Types)
 local Operations = require(script.Parent.Parent.Parent.datastore.Operations)
+local KeyViewLoader = require(script.Parent.Parent.Parent.datastore.KeyViewLoader)
 local HookManager = require(script.Parent.Parent.Parent.hooks.HookManager)
 local Functional = require(script.Parent.Parent.Parent.utils.Functional)
 local JSON = require(script.Parent.Parent.Parent.utils.JSON)
@@ -158,6 +159,69 @@ local function EditKeyView(): Frame
 		end
 
 		Store.isSavingKey(false)
+	end
+
+	local refreshCurrentKey = function()
+		local connection = Store.connection()
+		local keyName = Store.currentKey()
+
+		if not connection or not keyName then
+			return
+		end
+
+		if isDiffMode() or Store.currentVersion() ~= nil then
+			Store.showToast("warning", "Return to the latest key before refreshing")
+			return
+		end
+
+		if Store.hasUnsavedChanges() then
+			Store.showToast("warning", "Save or discard changes before refreshing")
+			return
+		end
+
+		local expandedPaths: { [string]: boolean }? = nil
+		if expandRef.getExpanded then
+			expandedPaths = Functional.deepClone((expandRef.getExpanded :: any)())
+		end
+
+		Store.isLoadingKey(true)
+		Store.keyError(nil)
+
+		local dsResult = Operations.getDataStore(connection)
+		if not dsResult.success then
+			Store.keyError(dsResult.error)
+			Store.showToast("error", `Failed to refresh key: {dsResult.error}`)
+			Store.isLoadingKey(false)
+			return
+		end
+
+		local keyResult = Operations.getKey(dsResult.value :: DataStore, keyName)
+		if keyResult.success then
+			local context = {
+				datastoreName = connection.name,
+				key = keyName,
+				scope = connection.scope,
+			}
+			local prepared = KeyViewLoader.prepare(keyResult.value, context, true)
+			Store.setCurrentKey(keyName, prepared.keyData, prepared.rawSize)
+
+			if viewMode() == "code" then
+				updateCodeEditor()
+			end
+
+			if expandedPaths and expandRef.setExpanded then
+				task.defer(function()
+					(expandRef.setExpanded :: any)(expandedPaths)
+				end)
+			end
+
+			Store.showToast("success", "Key refreshed")
+		else
+			Store.keyError(keyResult.error)
+			Store.showToast("error", `Failed to refresh key: {keyResult.error}`)
+		end
+
+		Store.isLoadingKey(false)
 	end
 
 	-- Delete handler - shows confirmation
@@ -588,6 +652,25 @@ local function EditKeyView(): Frame
 						HorizontalAlignment = Enum.HorizontalAlignment.Right,
 						VerticalAlignment = Enum.VerticalAlignment.Center,
 						Padding = UDim.new(0, 8),
+					},
+
+					-- Refresh button
+					create "Frame" {
+						Size = UDim2.fromOffset(28, 32),
+						BackgroundTransparency = 1,
+
+						Button({
+							text = "",
+							onClick = refreshCurrentKey,
+							variant = "ghost",
+							icon = theme.icons.refresh,
+							size = "small",
+							tooltip = "Refresh key",
+							disabled = function()
+								return Store.currentKey() == nil or Store.isLoadingKey() or Store.isSavingKey()
+							end,
+							fullWidth = true,
+						}),
 					},
 
 					-- Query button
