@@ -105,10 +105,11 @@ end
 function Operations.listKeys(
 	datastore: DataStore,
 	prefix: string?,
-	cursor: string?
+	cursor: string?,
+	excludeDeleted: boolean?
 ): Result<{ keys: { KeyInfo }, cursor: string? }>
 	local success, result = pcall(function()
-		local pages = datastore:ListKeysAsync(prefix, nil, cursor)
+		local pages = datastore:ListKeysAsync(prefix, nil, cursor, excludeDeleted == true)
 		local items = pages:GetCurrentPage()
 
 		local keys: { KeyInfo } = {}

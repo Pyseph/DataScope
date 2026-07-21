@@ -194,7 +194,7 @@ local function BrowseView(): Frame
 			end
 		else
 			local datastore = dsResult.value :: DataStore
-			local keysResult = Operations.listKeys(datastore, Store.keyPrefix() or nil, nil)
+			local keysResult = Operations.listKeys(datastore, Store.keyPrefix() or nil, nil, not Store.settings().listDeletedKeys)
 
 			if keysResult.success then
 				Store.keyList(keysResult.value.keys)
