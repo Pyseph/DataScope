@@ -54,7 +54,7 @@ https://create.roblox.com/store/asset/87717019449403/DataScope
 ### Using Wally
 ```toml
 [dependencies]
-DataScope = "pyseph/datascope@2.3.0"
+DataScope = "pyseph/datascope@2.3.1"
 ```
 
 ### Manual Installation

@@ -254,6 +254,8 @@ local function EditKeyView(): Frame
 		end
 
 		if result.success then
+			Store.removeKeyFromList(keyName)
+			Store.setCurrentKey(nil, nil, nil)
 			Store.showToast("success", "Key deleted")
 			showDeleteConfirm(false)
 			Store.setView("browse")

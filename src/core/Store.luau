@@ -443,6 +443,12 @@ function Store.setCurrentKey(key: string?, data: KeyData?, rawSize: number?)
 	Store.versionListLoading(false)
 end
 
+function Store.removeKeyFromList(keyName: string)
+	Store.keyList(Functional.filter(Store.keyList(), function(keyInfo)
+		return keyInfo.key ~= keyName
+	end))
+end
+
 function Store.setDiffView(state: DiffViewState?)
 	Store.diffView(state)
 end
